@@ -199,6 +199,115 @@ body {
 }
 #testPanel.hidden { display: none; }
 #testPanel.hidden + #togglePanel { display: block; }
+#tuningPanel {
+  position: fixed;
+  top: 10px;
+  left: 240px;
+  background: rgba(0,0,0,0.82);
+  border-radius: 10px;
+  font-size: 12px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  z-index: 20;
+  width: 246px;
+  max-height: calc(100vh - 30px);
+  display: flex;
+  flex-direction: column;
+  backdrop-filter: blur(6px);
+  border: 1px solid rgba(108,99,255,0.3);
+}
+.tpanel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 7px 12px;
+  color: #a78bfa;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  border-bottom: 1px solid rgba(108,99,255,0.2);
+  flex-shrink: 0;
+}
+.tpanel-header button {
+  background: none;
+  border: 1px solid #444;
+  color: #888;
+  border-radius: 4px;
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
+}
+.tpanel-header button:hover { border-color: #6c63ff; color: #a78bfa; }
+#tuningBody {
+  overflow-y: auto;
+  padding: 8px 12px 10px;
+  flex: 1;
+}
+#tuningBody.collapsed { display: none; }
+.tsec-title {
+  color: #666;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  margin: 8px 0 4px;
+  border-bottom: 1px solid #222;
+  padding-bottom: 3px;
+}
+.tsec-title:first-child { margin-top: 0; }
+.trow {
+  display: grid;
+  grid-template-columns: 86px 1fr 34px;
+  gap: 5px;
+  align-items: center;
+  margin-bottom: 3px;
+}
+.tlabel { color: #ccc; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tval { color: #6c63ff; font-weight: 600; text-align: right; font-size: 10px; }
+.trow input[type=range] { width: 100%; accent-color: #6c63ff; }
+#speechPanel {
+  position: fixed;
+  bottom: 80px;
+  left: 10px;
+  background: rgba(0,0,0,0.75);
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  z-index: 20;
+  min-width: 210px;
+  backdrop-filter: blur(6px);
+  border: 1px solid rgba(108,99,255,0.3);
+  line-height: 1.6;
+}
+#speechPanel h4 {
+  color: #a78bfa;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 8px;
+  margin-top: 0;
+}
+#speechPanel .srow {
+  display: grid;
+  grid-template-columns: 80px 1fr 38px;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 4px;
+}
+#speechPanel .slabel { color: #888; }
+#speechPanel .sval { color: #6c63ff; font-weight: 600; text-align: right; }
+#speechPanel input[type=range] { width: 100%; accent-color: #6c63ff; }
+#speechPanel .toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  color: #888;
+  font-size: 11px;
+}
+#speechPanel input[type=checkbox] { accent-color: #6c63ff; width: 13px; height: 13px; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -254,7 +363,38 @@ body {
 </div>
 <button id="togglePanel">Show Panel</button>
 
+<div id="tuningPanel">
+  <div class="tpanel-header">
+    <span>Phoneme &amp; Emotion Tuning</span>
+    <button id="btnTuningCollapse" title="Collapse">−</button>
+  </div>
+  <div id="tuningBody">
+    <div class="tsec-title">Phoneme visemes</div>
+    <div id="tunPhonemes"></div>
+    <div class="tsec-title">Emotions</div>
+    <div id="tunEmotions"></div>
+  </div>
+</div>
+
 <canvas id="canvas"></canvas>
+
+<div id="speechPanel">
+  <h4>Speech Controls</h4>
+  <div class="srow">
+    <span class="slabel">Phonemes</span>
+    <input type="range" id="sliderPhoneme" min="0" max="2" step="0.05" value="1">
+    <span class="sval" id="valPhoneme">1.00</span>
+  </div>
+  <div class="srow">
+    <span class="slabel">Emotions</span>
+    <input type="range" id="sliderEmotion" min="0" max="2" step="0.05" value="1">
+    <span class="sval" id="valEmotion">1.00</span>
+  </div>
+  <div class="toggle-row">
+    <input type="checkbox" id="emotionsToggle" checked>
+    <span>Эмоции включены</span>
+  </div>
+</div>
 
 <div id="ui">
   <select id="voiceSelect"></select>
@@ -276,6 +416,93 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+
+// ===== CHARACTER SHADER =====
+
+function patchCharacterShader(shader, isHair) {
+  shader.uniforms.uRimColor    = { value: new THREE.Color(0.55, 0.65, 0.85) };
+  shader.uniforms.uRimStrength = { value: isHair ? 0.15 : 0.35 };
+  shader.uniforms.uRimPower    = { value: 3.5 };
+
+  // Uniform declarations
+  shader.fragmentShader = shader.fragmentShader.replace(
+    'void main() {',
+    `uniform vec3  uRimColor;
+uniform float uRimStrength;
+uniform float uRimPower;
+void main() {`
+  );
+
+  // Geometric Specular AA (Tokuyoshi & Kaplanyan 2019):
+  // Bumps roughness where the normal changes quickly across screen pixels,
+  // eliminating specular aliasing on curved surfaces with detailed normal maps.
+  shader.fragmentShader = shader.fragmentShader.replace(
+    '#include <lights_fragment_begin>',
+    `{
+  float _r2 = roughnessFactor * roughnessFactor;
+  vec3  _dn = dFdx(normal), _dv = dFdy(normal);
+  float _var = 0.15 * (dot(_dn, _dn) + dot(_dv, _dv));
+  roughnessFactor = sqrt(clamp(_r2 + min(2.0 * _var, 0.18), 0.0, 1.0));
+}
+#include <lights_fragment_begin>`
+  );
+
+  // Direct specular occlusion (Filament "Moving to PBR" approximation).
+  // Expands the aomap chunk so AO also occludes direct specular, not just indirect.
+  shader.fragmentShader = shader.fragmentShader.replace(
+    '#include <aomap_fragment>',
+    THREE.ShaderChunk.aomap_fragment.replace(
+      'reflectedLight.indirectDiffuse *= ambientOcclusion;',
+      `reflectedLight.indirectDiffuse *= ambientOcclusion;
+  float NdotV_ao = saturate(dot(geometry.normal, geometry.viewDir));
+  float specOcc  = saturate(
+    pow(NdotV_ao + ambientOcclusion,
+        exp2(-16.0 * material.roughness * material.roughness - 1.0))
+    - 1.0 + ambientOcclusion);
+  reflectedLight.directSpecular *= specOcc;`
+    )
+  );
+
+  // Fresnel rim light — subtle backlit halo, suppressed on metallic surfaces.
+  shader.fragmentShader = shader.fragmentShader.replace(
+    'vec3 outgoingLight = totalDiffuse + totalSpecular + totalEmissiveRadiance;',
+    `vec3 outgoingLight = totalDiffuse + totalSpecular + totalEmissiveRadiance;
+float NdotV_rim = saturate(dot(geometry.normal, geometry.viewDir));
+float rim = pow(1.0 - NdotV_rim, uRimPower) * uRimStrength;
+outgoingLight += uRimColor * rim * (1.0 - metalnessFactor);`
+  );
+}
+
+function createCharacterMaterial(textures, isHair) {
+  const mat = new THREE.MeshStandardMaterial({
+    map:          textures.diffuse   || null,
+    normalMap:    textures.normal    || null,
+    roughnessMap: textures.roughness || null,
+    metalnessMap: textures.metalness || null,
+    aoMap:        textures.ao        || null,
+    aoMapIntensity: 1.0,
+    roughness: textures.roughness ? 1.0 : 0.7,
+    metalness: textures.metalness ? 1.0 : 0.05,
+    side: THREE.DoubleSide,
+    ...(isHair && {
+      alphaMap:    textures.opacity || null,
+      alphaTest:   0.5,
+      transparent: false,
+      depthWrite:  true,
+    }),
+  });
+  mat.onBeforeCompile = (shader) => patchCharacterShader(shader, isHair);
+  mat.customProgramCacheKey = () => `charMat_${isHair ? 'hair' : 'skin'}`;
+  return mat;
+}
+
+function isHairMesh(child) {
+  const matName = Array.isArray(child.material)
+    ? child.material[0]?.name || ''
+    : child.material?.name || '';
+  const name = (child.name + ' ' + matName).toLowerCase();
+  return /hair|wig|strand|card|fur/.test(name);
+}
 
 const PAGE_START = performance.now();
 
@@ -559,9 +786,12 @@ async function loadModelFromBlob(blob, filename) {
           ao:        'WhatsApp Image 2026-04-05 at 14.41.20.jpeg',
           normal:    'WhatsApp Image 2026-04-05 at 14.41.20 (1).jpeg',
           roughness: 'WhatsApp Image 2026-04-05 at 14.41.20 (2).jpeg',
+          metalness: '', // задайте имя файла, когда будет готово
+          opacity:   '', // для hair cards (alpha mask)
         };
 
         for (const [type, filename] of Object.entries(texFiles)) {
+          if (!filename) continue;
           try {
             const tresp = await fetch('./' + filename);
             const tblob = await tresp.blob();
@@ -592,16 +822,8 @@ async function loadModelFromBlob(blob, filename) {
           totalTris += (child.geometry.index ? child.geometry.index.count / 3 : (child.geometry.attributes.position?.count || 0) / 3);
 
           if (isKikyo) {
-            const oldMat = child.material;
-            child.material = new THREE.MeshStandardMaterial({
-              map: textures.diffuse || oldMat.map,
-              normalMap: textures.normal || oldMat.normalMap,
-              roughnessMap: textures.roughness || oldMat.roughnessMap,
-              aoMap: textures.ao || oldMat.aoMap,
-              roughness: 0.7,
-              metalness: 0.1,
-              side: THREE.DoubleSide,
-            });
+            const hair = isHairMesh(child);
+            child.material = createCharacterMaterial(textures, hair);
             if (textures.ao && child.geometry.attributes.uv) {
               child.geometry.attributes.uv2 = child.geometry.attributes.uv;
             }
@@ -830,8 +1052,7 @@ const EMO_LERP = 3; // slow smooth emotion transitions
 
 function setViseme(name, target) {
   if (!visemeState[name]) visemeState[name] = { current: 0, target: 0 };
-  // Accumulate within a tick (clearVisemes zeros target each tick)
-  visemeState[name].target += target;
+  visemeState[name].target += target * (phonemeMults[name] ?? 1.0);
 }
 
 function setEmotion(name, target) {
@@ -1121,16 +1342,17 @@ function tickLipSync() {
     curW = 1.0 - 0.5 * es; // ease-out from 1.0 to 0.5
   }
 
-  setViseme(p.primary, p.weight * curW);
-  if (p.secondary) setViseme(p.secondary, p.secWeight * curW);
+  const ps = phonemeStrength;
+  setViseme(p.primary, p.weight * curW * ps);
+  if (p.secondary) setViseme(p.secondary, p.secWeight * curW * ps);
 
   // PREV: only contributes in first CROSSFADE window, fading out from 0.5→0
   if (prev && local < CROSSFADE) {
     const a = 1 - (local / CROSSFADE);
     const blend = a * a * (3 - 2 * a);
     const pp = prev.phoneme;
-    setViseme(pp.primary, pp.weight * blend * 0.5);
-    if (pp.secondary) setViseme(pp.secondary, pp.secWeight * blend * 0.3);
+    setViseme(pp.primary, pp.weight * blend * 0.5 * ps);
+    if (pp.secondary) setViseme(pp.secondary, pp.secWeight * blend * 0.3 * ps);
   }
 
   // NEXT: only contributes in last CROSSFADE window, fading in from 0→0.5
@@ -1138,10 +1360,32 @@ function tickLipSync() {
     const a = (local - (1 - CROSSFADE)) / CROSSFADE;
     const blend = a * a * (3 - 2 * a);
     const np = next.phoneme;
-    setViseme(np.primary, np.weight * blend * 0.5);
-    if (np.secondary) setViseme(np.secondary, np.secWeight * blend * 0.3);
+    setViseme(np.primary, np.weight * blend * 0.5 * ps);
+    if (np.secondary) setViseme(np.secondary, np.secWeight * blend * 0.3 * ps);
   }
 }
+
+// ===== SPEECH CONTROL STATE =====
+let phonemeStrength = 1.0;
+let emotionStrengthMult = 1.0;
+let emotionsEnabled = true;
+
+// Per-viseme and per-emotion multipliers (tuning panel)
+const phonemeMults = {};
+const emotionMults = {};
+
+document.getElementById('sliderPhoneme').addEventListener('input', (e) => {
+  phonemeStrength = parseFloat(e.target.value);
+  document.getElementById('valPhoneme').textContent = phonemeStrength.toFixed(2);
+});
+document.getElementById('sliderEmotion').addEventListener('input', (e) => {
+  emotionStrengthMult = parseFloat(e.target.value);
+  document.getElementById('valEmotion').textContent = emotionStrengthMult.toFixed(2);
+});
+document.getElementById('emotionsToggle').addEventListener('change', (e) => {
+  emotionsEnabled = e.target.checked;
+  if (!emotionsEnabled) clearEmotions();
+});
 
 // ===== SPEECH SYNTHESIS =====
 const synth = window.speechSynthesis;
@@ -1283,12 +1527,12 @@ function updateEmotionsForChar(charIndex) {
   const range = emotionRanges.find(r => charIndex >= r.start && charIndex < r.end) || emotionRanges[0];
   if (!range) return;
 
-  // Clear then set from range
   clearEmotions();
+  if (!emotionsEnabled) return;
+  const profileMult = (emotionMults[range.dominant] ?? 1.0) * emotionStrengthMult;
   for (const [name, weight] of Object.entries(range.emotions)) {
-    // Only set if this emotion exists in the model
     if (morphMap[name]) {
-      setEmotion(name, weight);
+      setEmotion(name, weight * profileMult);
     }
   }
 }
@@ -1302,7 +1546,7 @@ function speak(text) {
   utt.pitch = 1.0;
 
   prepareWords(text);
-  // emotionRanges = analyzeEmotions(text); // disabled — phoneme-only mode
+  emotionRanges = analyzeEmotions(text);
 
   utt.onstart = () => {
     speaking = true;
@@ -1311,6 +1555,7 @@ function speak(text) {
     speechStartTime = performance.now() / 1000;
     charsPerSecond = 15;
     startWord(0);
+    updateEmotionsForChar(0);
     setStatus('Speaking...');
   };
 
@@ -1332,6 +1577,7 @@ function speak(text) {
       lastBoundaryChar = ev.charIndex;
 
       startWord(ev.charIndex);
+      updateEmotionsForChar(ev.charIndex);
     }
   };
 
@@ -1372,6 +1618,80 @@ document.getElementById('textInput').onkeydown = (e) => {
     if (t) speak(t);
   }
 };
+
+// ===== TUNING PANEL =====
+const PHONEME_VISEME_LIST = [
+  { key: 'AA',  label: 'AA — а, aw' },
+  { key: 'E',   label: 'E  — э, ей' },
+  { key: 'I',   label: 'I  — и, ee' },
+  { key: 'O',   label: 'O  — о' },
+  { key: 'U',   label: 'U  — у, oo' },
+  { key: 'PP',  label: 'PP — б, п, м' },
+  { key: 'FF',  label: 'FF — ф, в' },
+  { key: 'TH',  label: 'TH — th' },
+  { key: 'DD',  label: 'DD — д, т' },
+  { key: 'KK',  label: 'KK — к, г' },
+  { key: 'CH',  label: 'CH — ч, ш' },
+  { key: 'SS',  label: 'SS — с, з' },
+  { key: 'NN',  label: 'NN — н, л' },
+  { key: 'RR',  label: 'RR — р' },
+];
+
+function buildTuningPanel() {
+  const phContainer  = document.getElementById('tunPhonemes');
+  const emContainer  = document.getElementById('tunEmotions');
+
+  // Phoneme rows
+  for (const { key, label } of PHONEME_VISEME_LIST) {
+    phonemeMults[key] = 1.0;
+    const row = document.createElement('div');
+    row.className = 'trow';
+    row.innerHTML = `
+      <span class="tlabel" title="${label}">${label}</span>
+      <input type="range" min="0" max="2" step="0.05" value="1"
+             data-key="${key}" data-kind="phoneme">
+      <span class="tval" id="tv_p_${key}">1.00</span>`;
+    phContainer.appendChild(row);
+  }
+
+  // Emotion rows (one per profile)
+  for (const name of Object.keys(EMOTION_PROFILES)) {
+    emotionMults[name] = 1.0;
+    const row = document.createElement('div');
+    row.className = 'trow';
+    row.innerHTML = `
+      <span class="tlabel" title="${name}">${name}</span>
+      <input type="range" min="0" max="2" step="0.05" value="1"
+             data-key="${name}" data-kind="emotion">
+      <span class="tval" id="tv_e_${name}">1.00</span>`;
+    emContainer.appendChild(row);
+  }
+
+  // Single delegated listener on the panel
+  document.getElementById('tuningBody').addEventListener('input', (e) => {
+    if (e.target.type !== 'range') return;
+    const val  = parseFloat(e.target.value);
+    const key  = e.target.dataset.key;
+    const kind = e.target.dataset.kind;
+    if (kind === 'phoneme') {
+      phonemeMults[key] = val;
+      document.getElementById(`tv_p_${key}`).textContent = val.toFixed(2);
+    } else {
+      emotionMults[key] = val;
+      document.getElementById(`tv_e_${key}`).textContent = val.toFixed(2);
+    }
+  });
+
+  // Collapse / expand
+  document.getElementById('btnTuningCollapse').addEventListener('click', () => {
+    const body = document.getElementById('tuningBody');
+    const btn  = document.getElementById('btnTuningCollapse');
+    const collapsed = body.classList.toggle('collapsed');
+    btn.textContent = collapsed ? '+' : '−';
+  });
+}
+
+buildTuningPanel();
 
 // ===== IDLE =====
 let idleT = 0;
