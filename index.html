@@ -903,6 +903,24 @@ async function loadModelFromBlob(blob, filename) {
 
       buildTesterPanel(allShapes);
 
+      // Find jaw bone
+      let jawBone = null;
+      model.traverse(child => {
+        if (!jawBone && child.isBone && /jaw/i.test(child.name)) jawBone = child;
+      });
+      if (jawBone) console.log('Jaw bone:', jawBone.name);
+
+      // Resolve blink shape name
+      const blinkShape = morphMap['Blinking'] ? 'Blinking' : (morphMap['BLINK'] ? 'BLINK' : 'Blinking');
+
+      // Instantiate FaceController
+      faceCtrl = new FaceController(
+        new Map(Object.entries(morphMap)),
+        jawBone,
+        { blinkShape }
+      );
+      faceCtrl.manual = manualOverrides;
+
       // Compute raw bounds
       model.updateMatrixWorld(true);
       const rawBox = new THREE.Box3().setFromObject(model);
@@ -997,8 +1015,8 @@ async function handleFile(file) {
   }
   morphMeshes = [];
   morphMap = {};
-  visemeState && Object.keys(visemeState).forEach(k => delete visemeState[k]);
-  manualOverrides && Object.keys(manualOverrides).forEach(k => delete manualOverrides[k]);
+  faceCtrl = null;
+  Object.keys(manualOverrides).forEach(k => delete manualOverrides[k]);
 
   await loadModelFromBlob(file, file.name);
 }
@@ -1040,66 +1058,237 @@ window.addEventListener('drop', (e) => {
   }
 });
 
-// ===== EVENT-DRIVEN LIP SYNC ENGINE =====
-const manualOverrides = {};   // user panel sliders
-const emotionState = {};      // auto emotions during speech
+// ===== FACE CONTROLLER =====
+// Production-ready layered facial animation.
+// Layer 1 Visemes   — exclusive: 1 primary + 1 secondary, rest fade to 0
+// Layer 2 Emotions  — suppressed in mouth region during speech
+// Layer 3 Jaw bone  — driven by vowel amplitude, independent of lip shapes
+// Layer 4 Blink     — fully independent timer
+// Layer 5 Manual    — tester panel overrides, applied last
 
-// Viseme state with asymmetric lerp (fast open, slower close)
-const visemeState = {};
-const LERP_UP = 22;
-const LERP_DOWN = 8;
-const EMO_LERP = 3; // slow smooth emotion transitions
+const FC_DEG2RAD = Math.PI / 180;
 
-function setViseme(name, target) {
-  if (!visemeState[name]) visemeState[name] = { current: 0, target: 0 };
-  visemeState[name].target += target * (phonemeMults[name] ?? 1.0);
-}
+// How much each emotion shape occupies the mouth region (0 = upper face, 1 = full mouth).
+// Mouth shapes are scaled by (1 - speechIntensity * factor) during speech.
+const FC_MOUTH_FACTOR = {
+  'Smile':            0.85,
+  'Charisma':         0.25,
+  'Surpriced_O':      1.00,
+  'Surpriced_Normal': 0.08,
+  'Blinking':         0.00,
+  'BLINK':            0.00,
+};
 
-function setEmotion(name, target) {
-  if (!emotionState[name]) emotionState[name] = { current: 0, target: 0, base: 0 };
-  emotionState[name].target = target;
-  emotionState[name].base = target;
-}
+// Jaw open contribution per viseme (0 = lips only, 1 = full jaw travel)
+const FC_JAW_WEIGHTS = {
+  'AA': 0.90, 'O':  0.70, 'U':  0.50,
+  'E':  0.45, 'I':  0.25, 'RR': 0.35,
+  'PP': 0.00, 'FF': 0.10, 'TH': 0.20,
+  'DD': 0.15, 'KK': 0.10, 'CH': 0.30,
+  'SS': 0.15, 'NN': 0.10,
+};
 
-function clearVisemes() {
-  for (const v of Object.values(visemeState)) v.target = 0;
-}
+class FaceController {
+  constructor(morphMap, jawBone = null, cfg = {}) {
+    this._m   = morphMap;   // Map<name, {mesh, index}>
+    this._jaw = jawBone;
+    this._cfg = {
+      visemeRise:   22,   // lerp speed: viseme opening
+      visemeFall:    8,   // lerp speed: viseme closing
+      emotionLerp:   3,   // lerp speed: emotion transitions
+      speechRise:   12,   // lerp speed: speech intensity up
+      speechFall:    3,   // lerp speed: speech intensity down
+      jawMaxDeg:    18,   // degrees at full vowel
+      jawRise:      16,
+      jawFall:       9,
+      blinkShape:   'Blinking',
+      blinkMin:      3,   // seconds between blinks
+      blinkMax:      6,
+      blinkHalf:     0.10, // seconds: close phase (same for open)
+      ...cfg,
+    };
 
-function clearEmotions() {
-  for (const v of Object.values(emotionState)) { v.target = 0; v.base = 0; }
-}
+    // Viseme layer: Map<name, {cur}>
+    this._vis   = new Map();
+    // Pending viseme for this frame
+    this._vPri  = null;  // {name, w}
+    this._vSec  = null;  // {name, w}
 
-function applyVisemes(dt) {
-  // Update emotion state (slower lerp)
-  for (const [name, state] of Object.entries(emotionState)) {
-    state.current += (state.target - state.current) * Math.min(1, dt * EMO_LERP);
-    if (Math.abs(state.current) < 0.001) state.current = 0;
+    // Emotion layer: Map<name, {cur, tgt}>
+    this._emo   = new Map();
+
+    // Speech intensity drives emotion-mouth suppression
+    this._speech    = 0;
+    this._speechTgt = 0;
+
+    // Jaw
+    this._jawCur = 0;
+
+    // Blink
+    this._blinkCur    = 0;
+    this._blinkTimer  = 0;
+    this._blinkNext   = this._rndBlink();
+    this._blinkActive = false;
+    this._blinkPhase  = 0;
+
+    // Manual overrides (tester panel) — set externally: faceCtrl.manual = manualOverrides
+    this.manual = null;
+
+    // Double-buffered output — zero allocation per frame
+    this._outA = new Map();
+    this._outB = new Map();
   }
 
-  // Update viseme state (fast lerp, additive with emotion + manual)
-  const allNames = new Set([
-    ...Object.keys(visemeState),
-    ...Object.keys(emotionState),
-    ...Object.keys(manualOverrides),
-  ]);
+  // ── Public API ──────────────────────────────────────────────
 
-  for (const name of allNames) {
-    const vs = visemeState[name];
-    if (vs) {
-      const speed = vs.target > vs.current ? LERP_UP : LERP_DOWN;
-      vs.current += (vs.target - vs.current) * Math.min(1, dt * speed);
-      if (Math.abs(vs.current) < 0.001) vs.current = 0;
-    }
+  // Call every frame while speaking. Omitting = speech fades out naturally.
+  setViseme(primary, primaryW, secondary = null, secondaryW = 0) {
+    this._vPri      = primary   ? { name: primary,   w: Math.max(0, primaryW)   } : null;
+    this._vSec      = secondary ? { name: secondary, w: Math.max(0, secondaryW) } : null;
+    this._speechTgt = primaryW ?? 0;
+  }
 
-    const m = morphMap[name];
-    if (m) {
-      const viseme = vs?.current || 0;
-      const emotion = emotionState[name]?.current || 0;
-      const manual = manualOverrides[name] || 0;
-      m.mesh.morphTargetInfluences[m.index] = Math.min(1, viseme + emotion + manual);
+  setEmotion(name, weight) {
+    let s = this._emo.get(name);
+    if (!s) { s = { cur: 0, tgt: 0 }; this._emo.set(name, s); }
+    s.tgt = Math.max(0, Math.min(1, weight));
+  }
+
+  clearEmotions() {
+    for (const s of this._emo.values()) s.tgt = 0;
+  }
+
+  update(dt) {
+    this._stepSpeech(dt);
+    this._stepVisemes(dt);
+    this._stepEmotions(dt);
+    this._stepJaw(dt);
+    this._stepBlink(dt);
+    this._flush();
+  }
+
+  // ── Internal ────────────────────────────────────────────────
+
+  _stepSpeech(dt) {
+    const spd = this._speechTgt > this._speech ? this._cfg.speechRise : this._cfg.speechFall;
+    this._speech    += (this._speechTgt - this._speech) * Math.min(1, dt * spd);
+    this._speechTgt  = 0; // reset — caller must setViseme every frame to hold intensity
+  }
+
+  _stepVisemes(dt) {
+    // Build target: only primary and secondary are non-zero; all others decay to 0
+    const active = new Map();
+    if (this._vPri) active.set(this._vPri.name, this._vPri.w);
+    if (this._vSec) active.set(this._vSec.name, (active.get(this._vSec.name) ?? 0) + this._vSec.w);
+    this._vPri = this._vSec = null;
+
+    const rise = this._cfg.visemeRise;
+    const fall = this._cfg.visemeFall;
+    const all  = new Set([...this._vis.keys(), ...active.keys()]);
+
+    for (const name of all) {
+      let s = this._vis.get(name);
+      if (!s) { s = { cur: 0 }; this._vis.set(name, s); }
+
+      const tgt = active.get(name) ?? 0;
+      s.cur += (tgt - s.cur) * Math.min(1, dt * (tgt > s.cur ? rise : fall));
+
+      if (s.cur < 0.0008 && tgt === 0) this._vis.delete(name);
     }
   }
+
+  _stepEmotions(dt) {
+    const spd = this._cfg.emotionLerp;
+    for (const [name, s] of this._emo) {
+      s.cur += (s.tgt - s.cur) * Math.min(1, dt * spd);
+      if (s.cur < 0.0008 && s.tgt === 0) this._emo.delete(name);
+    }
+  }
+
+  _stepJaw(dt) {
+    // Jaw = max jaw contribution across all active visemes
+    let tgt = 0;
+    for (const [name, s] of this._vis) {
+      const j = (FC_JAW_WEIGHTS[name] ?? 0) * s.cur;
+      if (j > tgt) tgt = j;
+    }
+    const spd = tgt > this._jawCur ? this._cfg.jawRise : this._cfg.jawFall;
+    this._jawCur += (tgt - this._jawCur) * Math.min(1, dt * spd);
+    if (this._jaw) this._jaw.rotation.x = -this._jawCur * this._cfg.jawMaxDeg * FC_DEG2RAD;
+  }
+
+  _stepBlink(dt) {
+    this._blinkTimer += dt;
+    if (!this._blinkActive && this._blinkTimer >= this._blinkNext) {
+      this._blinkActive = true;
+      this._blinkPhase  = 0;
+      this._blinkTimer  = 0;
+      this._blinkNext   = this._rndBlink();
+    }
+    if (this._blinkActive) {
+      this._blinkPhase += dt;
+      const h = this._cfg.blinkHalf;
+      if      (this._blinkPhase < h)     this._blinkCur = this._blinkPhase / h;
+      else if (this._blinkPhase < h * 2) this._blinkCur = 1 - (this._blinkPhase - h) / h;
+      else { this._blinkCur = 0; this._blinkActive = false; }
+    }
+  }
+
+  _flush() {
+    const out  = this._outA;
+    const prev = this._outB;
+    out.clear();
+
+    // Layer 1: Visemes
+    for (const [name, s] of this._vis)
+      if (s.cur > 0.0008) out.set(name, s.cur);
+
+    // Layer 2: Emotions — additive on top of visemes, mouth region suppressed during speech
+    for (const [name, s] of this._emo) {
+      if (s.cur < 0.0008) continue;
+      const mf  = FC_MOUTH_FACTOR[name] ?? 0.5;
+      const w   = s.cur * (1 - this._speech * mf);
+      if (w < 0.0008) continue;
+      out.set(name, Math.min(1, (out.get(name) ?? 0) + w));
+    }
+
+    // Layer 3: Blink — independent, no suppression
+    if (this._blinkCur > 0.0008)
+      out.set(this._cfg.blinkShape, Math.min(1, (out.get(this._cfg.blinkShape) ?? 0) + this._blinkCur));
+
+    // Layer 4: Manual overrides (tester panel)
+    if (this.manual) {
+      for (const [name, w] of Object.entries(this.manual)) {
+        if (w > 0.001) out.set(name, Math.min(1, (out.get(name) ?? 0) + w));
+      }
+    }
+
+    // Write to morphTargetInfluences
+    for (const [name, w] of out) {
+      const r = this._m.get(name);
+      if (r) r.mesh.morphTargetInfluences[r.index] = w;
+    }
+    // Zero shapes active last frame but not this frame
+    for (const name of prev.keys()) {
+      if (!out.has(name)) {
+        const r = this._m.get(name);
+        if (r) r.mesh.morphTargetInfluences[r.index] = 0;
+      }
+    }
+
+    // Swap double buffers
+    this._outA = prev;
+    this._outB = out;
+  }
+
+  _rndBlink() {
+    return this._cfg.blinkMin + Math.random() * (this._cfg.blinkMax - this._cfg.blinkMin);
+  }
 }
+
+// Global controller instance — created after model loads
+let faceCtrl = null;
+const manualOverrides = {}; // tester panel sliders write here → faceCtrl.manual
 
 // ===== TESTER PANEL =====
 const VISEME_KEYS = ['AA', 'E', 'I', 'O', 'U', 'PP', 'FF', 'TH', 'DD', 'KK', 'CH', 'SS', 'NN', 'RR'];
@@ -1197,8 +1386,7 @@ document.getElementById('resetShapes').addEventListener('click', () => {
     if (valEl) valEl.textContent = '0.00';
   });
   // Also clear morph influences that might have been set
-  for (const [name, m] of Object.entries(morphMap)) {
-    if (visemeState[name]) visemeState[name].current = 0;
+  for (const m of Object.values(morphMap)) {
     m.mesh.morphTargetInfluences[m.index] = 0;
   }
 });
@@ -1298,71 +1486,24 @@ function getPhonemeAt(elapsed) {
   return null;
 }
 
+// Sample the phoneme at current playback position and feed it to FaceController.
+// Cross-fade between adjacent phonemes is handled automatically by the controller's
+// asymmetric lerp (visemeRise / visemeFall) — no manual windowing needed.
 function tickLipSync() {
-  if (!speaking) return;
-
-  clearVisemes();
-
-  if (phonemeSchedule.length === 0) return;
+  if (!speaking || !faceCtrl || phonemeSchedule.length === 0) return;
 
   const elapsed = (performance.now() / 1000) - wordStartTime;
-  const total = phonemeSchedule[phonemeSchedule.length - 1].end;
+  if (elapsed >= phonemeSchedule[phonemeSchedule.length - 1].end) return;
 
-  if (elapsed >= total) {
-    // Hold neutral at end of word
-    return;
-  }
+  const hit = getPhonemeAt(elapsed);
+  if (!hit) return;
 
-  // Find current and neighboring phonemes
-  const current = getPhonemeAt(elapsed);
-  if (!current) return;
-
-  const slot = current.slot;
-  const prev = current.index > 0 ? phonemeSchedule[current.index - 1] : null;
-  const next = current.index < phonemeSchedule.length - 1 ? phonemeSchedule[current.index + 1] : null;
-
-  const dur = slot.end - slot.start;
-  const local = Math.max(0, Math.min(1, (elapsed - slot.start) / dur));
-
-  // Approach: continuous linear blend between (prev, current, next)
-  // based on where we are in the schedule, using half-durations.
-  const p = slot.phoneme;
-  const CROSSFADE = 0.4; // fraction of phoneme duration devoted to each crossfade edge
-
-  // Current weight: peak at middle, fade to 0.5 at edges
-  let curW;
-  if (local < CROSSFADE) {
-    const a = local / CROSSFADE;
-    curW = 0.5 + 0.5 * (a * a * (3 - 2 * a)); // ease-in from 0.5 to 1.0
-  } else if (local < (1 - CROSSFADE)) {
-    curW = 1.0;
-  } else {
-    const a = (local - (1 - CROSSFADE)) / CROSSFADE;
-    const es = a * a * (3 - 2 * a);
-    curW = 1.0 - 0.5 * es; // ease-out from 1.0 to 0.5
-  }
-
+  const p  = hit.slot.phoneme;
   const ps = phonemeStrength;
-  setViseme(p.primary, p.weight * curW * ps);
-  if (p.secondary) setViseme(p.secondary, p.secWeight * curW * ps);
-
-  // PREV: only contributes in first CROSSFADE window, fading out from 0.5→0
-  if (prev && local < CROSSFADE) {
-    const a = 1 - (local / CROSSFADE);
-    const blend = a * a * (3 - 2 * a);
-    const pp = prev.phoneme;
-    setViseme(pp.primary, pp.weight * blend * 0.5 * ps);
-    if (pp.secondary) setViseme(pp.secondary, pp.secWeight * blend * 0.3 * ps);
-  }
-
-  // NEXT: only contributes in last CROSSFADE window, fading in from 0→0.5
-  if (next && local > (1 - CROSSFADE)) {
-    const a = (local - (1 - CROSSFADE)) / CROSSFADE;
-    const blend = a * a * (3 - 2 * a);
-    const np = next.phoneme;
-    setViseme(np.primary, np.weight * blend * 0.5 * ps);
-    if (np.secondary) setViseme(np.secondary, np.secWeight * blend * 0.3 * ps);
-  }
+  faceCtrl.setViseme(
+    p.primary,            p.weight    * ps,
+    p.secondary || null, (p.secWeight ?? 0) * ps,
+  );
 }
 
 // ===== SPEECH CONTROL STATE =====
@@ -1384,7 +1525,7 @@ document.getElementById('sliderEmotion').addEventListener('input', (e) => {
 });
 document.getElementById('emotionsToggle').addEventListener('change', (e) => {
   emotionsEnabled = e.target.checked;
-  if (!emotionsEnabled) clearEmotions();
+  if (!emotionsEnabled) faceCtrl?.clearEmotions();
 });
 
 // ===== SPEECH SYNTHESIS =====
@@ -1527,13 +1668,11 @@ function updateEmotionsForChar(charIndex) {
   const range = emotionRanges.find(r => charIndex >= r.start && charIndex < r.end) || emotionRanges[0];
   if (!range) return;
 
-  clearEmotions();
+  faceCtrl?.clearEmotions();
   if (!emotionsEnabled) return;
   const profileMult = (emotionMults[range.dominant] ?? 1.0) * emotionStrengthMult;
   for (const [name, weight] of Object.entries(range.emotions)) {
-    if (morphMap[name]) {
-      setEmotion(name, weight * profileMult);
-    }
+    if (morphMap[name]) faceCtrl?.setEmotion(name, weight * profileMult);
   }
 }
 
@@ -1585,8 +1724,7 @@ function speak(text) {
     setTimeout(() => {
       speaking = false;
       currentWordPhonemes = [];
-      clearVisemes();
-      clearEmotions();
+      faceCtrl?.clearEmotions();
       document.getElementById('lsStatus').textContent = 'idle';
       setStatus('Ready');
       document.getElementById('speakBtn').disabled = false;
@@ -1597,8 +1735,7 @@ function speak(text) {
     console.error('TTS error:', e.error);
     speaking = false;
     currentWordPhonemes = [];
-    clearVisemes();
-    clearEmotions();
+    faceCtrl?.clearEmotions();
     setStatus('Speech error: ' + e.error);
     document.getElementById('speakBtn').disabled = false;
   };
@@ -1693,27 +1830,6 @@ function buildTuningPanel() {
 
 buildTuningPanel();
 
-// ===== IDLE =====
-let idleT = 0;
-function idleAnimation(dt) {
-  if (speaking) return;
-  idleT += dt;
-
-  if (morphMap['AA']) {
-    const m = morphMap['AA'];
-    m.mesh.morphTargetInfluences[m.index] = Math.sin(idleT * 1.5) * 0.015 + 0.015;
-  }
-  if (morphMap['BLINK']) {
-    const m = morphMap['BLINK'];
-    const cycle = idleT % 3.5;
-    let w = 0;
-    if (cycle > 3.2) {
-      const t = (cycle - 3.2) / 0.3;
-      w = t < 0.5 ? t * 2 : (1 - t) * 2;
-    }
-    m.mesh.morphTargetInfluences[m.index] = w;
-  }
-}
 
 // ===== FPS COUNTER =====
 let fpsFrames = 0;
@@ -1751,8 +1867,7 @@ function animate() {
   controls.update();
 
   tickLipSync();
-  applyVisemes(dt);
-  idleAnimation(dt);
+  faceCtrl?.update(dt);
 
   renderer.render(scene, camera);
   updateFPS();
