@@ -1011,8 +1011,8 @@ async function loadModelFromBlob(blob, filename) {
 
       // Frame the upper body (bust shot) for a 1.7m character
       const faceY = 1.55;                    // eye/face height
-      controls.target.set(0, faceY - 0.1, 0); // target chest-up so bust composition
-      camera.position.set(0, faceY, 1.8);     // back enough to see head + shoulders
+      controls.target.set(0, faceY - 0.15, 0); // target around mid-bust
+      camera.position.set(0, faceY, 3.6);     // back enough to see head + shoulders with margin
       camera.near = 0.01;
       camera.far = 100;
       camera.fov = 35;
