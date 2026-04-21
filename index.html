@@ -83,6 +83,25 @@ body {
   transition: transform 0.15s, box-shadow 0.15s;
 }
 #replaceBtn:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(108,99,255,0.6); }
+#deleteBtn {
+  position: fixed;
+  top: 12px;
+  right: 168px;
+  padding: 10px 14px;
+  background: rgba(30, 30, 60, 0.82);
+  border: 1px solid rgba(255, 100, 100, 0.35);
+  border-radius: 10px;
+  color: #ff8a8a;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: 'Segoe UI', sans-serif;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+  z-index: 50;
+  display: none;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+#deleteBtn:hover { border-color: #ff5555; color: #ff5555; background: rgba(60, 20, 20, 0.85); }
 .spinner {
   width: 50px; height: 50px;
   border: 4px solid #333;
@@ -376,6 +395,7 @@ body {
 
 <div id="status">Ready</div>
 <button id="replaceBtn" title="Load a different GLB model">📂 Replace model</button>
+<button id="deleteBtn" title="Delete saved model and load default">🗑 Delete</button>
 
 <div id="testPanel">
   <h3>Blendshape Tester <span class="sub" id="shapeCount"></span></h3>
@@ -1019,6 +1039,52 @@ async function loadModelFromBlob(blob, filename) {
     }
 }
 
+// ===== PERSISTENCE (IndexedDB — GLBs can be many MB, too big for localStorage) =====
+const PERSIST_DB = 'kikyo-lipsync';
+const PERSIST_STORE = 'models';
+const PERSIST_KEY = 'current';
+
+function _openPersistDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(PERSIST_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(PERSIST_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror   = () => reject(req.error);
+  });
+}
+async function persistedModelGet() {
+  try {
+    const db = await _openPersistDB();
+    return await new Promise((resolve, reject) => {
+      const req = db.transaction(PERSIST_STORE, 'readonly').objectStore(PERSIST_STORE).get(PERSIST_KEY);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror   = () => reject(req.error);
+    });
+  } catch (e) { console.warn('persistedModelGet failed:', e); return null; }
+}
+async function persistedModelPut(blob, name) {
+  try {
+    const db = await _openPersistDB();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(PERSIST_STORE, 'readwrite');
+      tx.objectStore(PERSIST_STORE).put({ blob, name, savedAt: Date.now() }, PERSIST_KEY);
+      tx.oncomplete = () => resolve();
+      tx.onerror    = () => reject(tx.error);
+    });
+  } catch (e) { console.warn('persistedModelPut failed:', e); }
+}
+async function persistedModelClear() {
+  try {
+    const db = await _openPersistDB();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(PERSIST_STORE, 'readwrite');
+      tx.objectStore(PERSIST_STORE).delete(PERSIST_KEY);
+      tx.oncomplete = () => resolve();
+      tx.onerror    = () => reject(tx.error);
+    });
+  } catch (e) { console.warn('persistedModelClear failed:', e); }
+}
+
 // ===== FILE PICKER / DROP ZONE =====
 const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('fileInput');
@@ -1043,6 +1109,9 @@ async function handleFile(file) {
   Object.keys(manualOverrides).forEach(k => delete manualOverrides[k]);
 
   await loadModelFromBlob(file, file.name);
+  // Persist so the model survives page reloads
+  persistedModelPut(file, file.name);
+  document.getElementById('deleteBtn').style.display = 'block';
 }
 
 pickBtn.addEventListener('click', (e) => {
@@ -1910,8 +1979,22 @@ function animate() {
 }
 animate();
 
-// Auto-load default model on startup; show file picker only if none found
+// Auto-load: 1) persisted user model  2) bundled default  3) file picker
 async function autoLoadDefault() {
+  // 1. Previously saved model (survives reloads)
+  const saved = await persistedModelGet();
+  if (saved?.blob) {
+    try {
+      await loadModelFromBlob(saved.blob, saved.name || 'saved.glb');
+      document.getElementById('deleteBtn').style.display = 'block';
+      return;
+    } catch (e) {
+      console.warn('Saved model failed to load, falling back:', e);
+      await persistedModelClear();
+    }
+  }
+
+  // 2. Bundled candidates
   const candidates = ['KikyoNewTest.glb', 'KikyoNewTestAnimation.glb', 'BS_Rig_Test_V01_compressed.glb'];
   for (const name of candidates) {
     try {
@@ -1922,13 +2005,20 @@ async function autoLoadDefault() {
       return;
     } catch {}
   }
-  // No bundled model found — fall back to file picker UI
+
+  // 3. No model at all — show picker
   loadingText.style.display = 'none';
   loadingSpinner.style.display = 'none';
   dropZone.style.display = 'flex';
 }
 
 document.getElementById('replaceBtn').addEventListener('click', () => fileInput.click());
+document.getElementById('deleteBtn').addEventListener('click', async () => {
+  if (!confirm('Delete the saved model and revert to the default?')) return;
+  await persistedModelClear();
+  document.getElementById('deleteBtn').style.display = 'none';
+  location.reload();
+});
 autoLoadDefault();
 
 // Resize
