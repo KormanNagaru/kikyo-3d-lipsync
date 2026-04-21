@@ -1009,15 +1009,15 @@ async function loadModelFromBlob(blob, filename) {
       );
       model.updateMatrixWorld(true);
 
-      // Hard-coded ideal camera for a 1.7m character
-      const faceY = 1.55; // eye/face height
-      controls.target.set(0, faceY, 0);
-      camera.position.set(0, faceY, 0.7); // close up on face
+      // Frame the upper body (bust shot) for a 1.7m character
+      const faceY = 1.55;                    // eye/face height
+      controls.target.set(0, faceY - 0.1, 0); // target chest-up so bust composition
+      camera.position.set(0, faceY, 1.8);     // back enough to see head + shoulders
       camera.near = 0.01;
       camera.far = 100;
       camera.fov = 35;
       camera.updateProjectionMatrix();
-      controls.minDistance = 0.1;
+      controls.minDistance = 0.3;
       controls.maxDistance = 10;
       controls.update();
       console.log('Camera:', camera.position, 'target:', controls.target);
