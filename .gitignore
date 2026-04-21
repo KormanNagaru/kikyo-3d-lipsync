@@ -1,0 +1,7 @@
+# Large source GLB files (>100MB not allowed on GitHub without LFS)
+*.glb.big
+BS_Rig_Test_V01.glb
+# Deployed output temp
+.wrangler/
+node_modules/
+*.log

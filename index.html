@@ -1,0 +1,1457 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kikyo - 3D Lip Sync</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #1a1a2e;
+  font-family: 'Segoe UI', sans-serif;
+  overflow: hidden;
+  color: #fff;
+}
+#canvas { width: 100vw; height: 100vh; display: block; }
+#ui {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 10px;
+  z-index: 10;
+  width: 90%;
+  max-width: 700px;
+}
+#textInput {
+  flex: 1;
+  padding: 14px 20px;
+  border: 2px solid #6c63ff;
+  border-radius: 25px;
+  background: rgba(30, 30, 60, 0.9);
+  color: #fff;
+  font-size: 16px;
+  outline: none;
+  backdrop-filter: blur(10px);
+}
+#textInput::placeholder { color: #888; }
+#textInput:focus { border-color: #a78bfa; }
+#speakBtn {
+  padding: 14px 28px;
+  border: none;
+  border-radius: 25px;
+  background: linear-gradient(135deg, #6c63ff, #a78bfa);
+  color: #fff;
+  font-size: 16px;
+  cursor: pointer;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: transform 0.1s;
+}
+#speakBtn:hover { transform: scale(1.05); }
+#speakBtn:active { transform: scale(0.95); }
+#speakBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+#loading {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: #1a1a2e;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  transition: opacity 0.5s;
+}
+#loading.hidden { opacity: 0; pointer-events: none; }
+.spinner {
+  width: 50px; height: 50px;
+  border: 4px solid #333;
+  border-top-color: #6c63ff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+#loading p { margin-top: 20px; color: #aaa; font-size: 14px; }
+#voiceSelect {
+  padding: 10px 14px;
+  border: 2px solid #6c63ff;
+  border-radius: 20px;
+  background: rgba(30, 30, 60, 0.9);
+  color: #fff;
+  font-size: 14px;
+  outline: none;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+}
+/* Stats panel */
+#stats {
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  background: rgba(0,0,0,0.75);
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  line-height: 1.6;
+  z-index: 20;
+  min-width: 220px;
+  backdrop-filter: blur(6px);
+  border: 1px solid rgba(108,99,255,0.3);
+}
+#stats .label { color: #888; }
+#stats .value { color: #6c63ff; font-weight: 600; }
+#stats .good { color: #4ade80; }
+#stats .warn { color: #fbbf24; }
+#stats .bad { color: #f87171; }
+#status {
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  padding: 8px 16px;
+  background: rgba(30, 30, 60, 0.8);
+  border-radius: 12px;
+  font-size: 13px;
+  color: #aaa;
+  z-index: 10;
+  backdrop-filter: blur(10px);
+}
+/* Blendshape tester panel */
+#testPanel {
+  position: fixed;
+  top: 50px;
+  right: 10px;
+  width: 280px;
+  max-height: calc(100vh - 140px);
+  background: rgba(0, 0, 0, 0.8);
+  border: 1px solid rgba(108, 99, 255, 0.4);
+  border-radius: 12px;
+  padding: 12px;
+  z-index: 20;
+  backdrop-filter: blur(10px);
+  overflow-y: auto;
+  font-size: 12px;
+}
+#testPanel h3 {
+  font-size: 12px;
+  color: #a78bfa;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+#testPanel h3 .sub { color: #666; font-weight: normal; font-size: 10px; letter-spacing: 0; }
+#testPanel .row {
+  display: grid;
+  grid-template-columns: 70px 1fr 40px;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 3px;
+}
+#testPanel .name { color: #ccc; font-family: monospace; }
+#testPanel .emotion { color: #fbbf24; }
+#testPanel input[type=range] {
+  width: 100%;
+  accent-color: #6c63ff;
+}
+#testPanel .val { color: #6c63ff; font-family: monospace; text-align: right; font-size: 10px; }
+#testPanel .section { border-top: 1px solid #333; margin-top: 10px; padding-top: 8px; }
+#testPanel button.vbtn {
+  padding: 4px 8px;
+  margin: 2px;
+  border: 1px solid #444;
+  background: rgba(108, 99, 255, 0.1);
+  color: #ccc;
+  border-radius: 6px;
+  font-size: 11px;
+  cursor: pointer;
+  font-family: monospace;
+}
+#testPanel button.vbtn:hover { background: rgba(108, 99, 255, 0.3); border-color: #6c63ff; }
+#testPanel button.vbtn:active { transform: scale(0.95); }
+#testPanel .resetBtn {
+  width: 100%;
+  padding: 6px;
+  background: rgba(239, 68, 68, 0.2);
+  border: 1px solid #ef4444;
+  color: #fca5a5;
+  border-radius: 6px;
+  cursor: pointer;
+  margin-top: 8px;
+  font-size: 11px;
+}
+#togglePanel {
+  position: fixed;
+  top: 50px;
+  right: 10px;
+  z-index: 21;
+  padding: 6px 10px;
+  background: rgba(108, 99, 255, 0.8);
+  border: none;
+  color: white;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 11px;
+  display: none;
+}
+#testPanel.hidden { display: none; }
+#testPanel.hidden + #togglePanel { display: block; }
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <div id="dropZone" style="
+    border: 2px dashed #6c63ff;
+    border-radius: 16px;
+    padding: 60px 80px;
+    text-align: center;
+    background: rgba(108, 99, 255, 0.05);
+    transition: all 0.2s;
+    cursor: pointer;
+  ">
+    <div style="font-size: 48px; margin-bottom: 16px;">📦</div>
+    <h2 style="margin-bottom: 12px; color: #a78bfa;">Drop your GLB file here</h2>
+    <p style="color: #888; margin-bottom: 20px;">or click to browse</p>
+    <button id="pickBtn" style="
+      padding: 12px 28px;
+      background: linear-gradient(135deg, #6c63ff, #a78bfa);
+      color: white;
+      border: none;
+      border-radius: 25px;
+      font-size: 14px;
+      cursor: pointer;
+      font-weight: 600;
+    ">Choose GLB File</button>
+    <input type="file" id="fileInput" accept=".glb,.gltf" style="display: none;">
+  </div>
+  <p id="loadingText" style="margin-top: 20px; color: #666; display: none;"></p>
+  <div class="spinner" style="display: none;" id="loadSpinner"></div>
+</div>
+
+<div id="stats">
+  <div><span class="label">FPS: </span><span id="fpsVal" class="value">--</span></div>
+  <div><span class="label">Frame: </span><span id="frameTime" class="value">--</span></div>
+  <div><span class="label">Load time: </span><span id="loadTime" class="value">--</span></div>
+  <div><span class="label">Model: </span><span id="modelSize" class="value">--</span></div>
+  <div><span class="label">Textures: </span><span id="texSize" class="value">--</span></div>
+  <div><span class="label">Total: </span><span id="totalSize" class="value">--</span></div>
+  <div><span class="label">Triangles: </span><span id="triCount" class="value">--</span></div>
+  <div><span class="label">Draw calls: </span><span id="drawCalls" class="value">--</span></div>
+  <div><span class="label">Lip sync: </span><span id="lsStatus" class="value">idle</span></div>
+</div>
+
+<div id="status">Ready</div>
+
+<div id="testPanel">
+  <h3>Blendshape Tester <span class="sub" id="shapeCount"></span></h3>
+  <div id="quickVisemes" style="margin-bottom: 8px; display: flex; flex-wrap: wrap;"></div>
+  <div id="shapeSliders"></div>
+  <button class="resetBtn" id="resetShapes">Reset All</button>
+</div>
+<button id="togglePanel">Show Panel</button>
+
+<canvas id="canvas"></canvas>
+
+<div id="ui">
+  <select id="voiceSelect"></select>
+  <input type="text" id="textInput" placeholder="Type text and press Speak..." autofocus />
+  <button id="speakBtn">Speak</button>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+
+const PAGE_START = performance.now();
+
+// ===== SCENE =====
+const canvas = document.getElementById('canvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a2e);
+
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 1000);
+camera.position.set(0, 1, 5);
+
+const controls = new OrbitControls(camera, canvas);
+controls.target.set(0, 1, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.maxDistance = 50;
+controls.minDistance = 0.1;
+controls.update();
+
+// ===== LIGHTING =====
+scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+const mainLight = new THREE.DirectionalLight(0xffffff, 2.0);
+mainLight.position.set(2, 3, 4);
+scene.add(mainLight);
+const fillLight = new THREE.DirectionalLight(0xffffff, 1.0);
+fillLight.position.set(-2, 1, -2);
+scene.add(fillLight);
+scene.add(new THREE.DirectionalLight(0xffffff, 0.5).translateZ(-3).translateY(2));
+
+// Ground grid
+scene.add(new THREE.GridHelper(4, 10, 0x333344, 0x1a1a2e));
+
+// ===== STATE =====
+let morphMeshes = [];
+let morphMap = {};
+let mixer = null;
+let model = null;
+let assetSizes = { model: 0, textures: 0 };
+
+// ===== VRC VISEME MAPPING =====
+const VISEME_NAMES = {
+  'vrc.v_aa': 'AA', 'vrc.v_ch': 'CH', 'vrc.v_dd': 'DD', 'vrc.v_e': 'E',
+  'vrc.v_ff': 'FF', 'vrc.v_ih': 'I', 'vrc.v_kk': 'KK', 'vrc.v_nn': 'NN',
+  'vrc.v_oh': 'O', 'vrc.v_ou': 'U', 'vrc.v_pp': 'PP', 'vrc.v_rr': 'RR',
+  'vrc.v_sil': 'SIL', 'vrc.v_ss': 'SS', 'vrc.v_th': 'TH',
+  'vrc.Blink': 'BLINK', 'smile': 'SMILE', 'scream': 'SCREAM',
+};
+
+// ===== PHONEME ENGINE =====
+// Longest-match rules (order matters; checked top-to-bottom)
+const PHONEME_RULES = [
+  // --- Russian soft-consonant + vowel combinations (palatalized) ---
+  [/тьс[яеё]/g, 'TS_YAH'],     // -тся
+  [/тся/g,   'TS_AH'],
+  [/ться/g,  'TS_AH'],
+  [/шь/g,    'SH'], [/чь/g, 'CH'], [/щь/g, 'SH'],
+  [/жь/g,    'SH'],
+  // Soft consonant before vowel → palatalized pair
+  [/бь[её]/g, 'B IY_EH'], [/бью/g, 'B IY_UW'], [/бья/g, 'B IY_AH'],
+  [/пь[её]/g, 'P IY_EH'], [/пью/g, 'P IY_UW'], [/пья/g, 'P IY_AH'],
+  [/мь[её]/g, 'M IY_EH'], [/мью/g, 'M IY_UW'], [/мья/g, 'M IY_AH'],
+  [/дь[её]/g, 'D IY_EH'], [/дью/g, 'D IY_UW'], [/дья/g, 'D IY_AH'],
+  [/ть[её]/g, 'T IY_EH'], [/тью/g, 'T IY_UW'], [/тья/g, 'T IY_AH'],
+  [/нь[её]/g, 'N IY_EH'], [/нью/g, 'N IY_UW'], [/нья/g, 'N IY_AH'],
+  [/ль[её]/g, 'L IY_EH'], [/лью/g, 'L IY_UW'], [/лья/g, 'L IY_AH'],
+  [/сь[её]/g, 'S IY_EH'], [/сью/g, 'S IY_UW'], [/сья/g, 'S IY_AH'],
+  [/зь[её]/g, 'Z IY_EH'], [/зью/g, 'Z IY_UW'], [/зья/g, 'Z IY_AH'],
+  [/рь[её]/g, 'R IY_EH'], [/рью/g, 'R IY_UW'], [/рья/g, 'R IY_AH'],
+  [/вь[её]/g, 'V IY_EH'], [/вью/g, 'V IY_UW'], [/вья/g, 'V IY_AH'],
+
+  // Russian digraphs/clusters
+  [/жш|шж/g, 'SH'],
+  [/сш|зш/g, 'SH'],
+  [/сч|зч/g, 'SH'],
+  [/тц|дц/g, 'TS'],
+  [/тч|дч/g, 'CH'],
+  [/тс/g, 'TS'], [/дз/g, 'DZ'],
+  [/ый|ий|ей/g, 'IY Y'],
+
+  // Russian iotated vowels (word-initial or after vowel/ь/ъ acts differently, but approximate)
+  [/е/g, 'YEH'], [/ё/g, 'YOH'], [/ю/g, 'YUW'], [/я/g, 'YAH'],
+
+  // Russian plain vowels
+  [/а/g, 'AH'], [/о/g, 'OH'], [/у/g, 'UW'],
+  [/э/g, 'EH'], [/и/g, 'IY'], [/ы/g, 'IH'],
+
+  // Russian consonants
+  [/б/g, 'B'], [/в/g, 'V'], [/г/g, 'G'], [/д/g, 'D'], [/ж/g, 'ZH'],
+  [/з/g, 'Z'], [/й/g, 'Y'], [/к/g, 'K'], [/л/g, 'L'], [/м/g, 'M'],
+  [/н/g, 'N'], [/п/g, 'P'], [/р/g, 'R'], [/с/g, 'S'], [/т/g, 'T'],
+  [/ф/g, 'F'], [/х/g, 'HH'], [/ц/g, 'TS'], [/ч/g, 'CH'], [/ш/g, 'SH'],
+  [/щ/g, 'SH_CH'],
+  [/ъ|ь/g, ''],
+
+  // --- English multi-char ---
+  [/tion/g, 'SH AH N'],
+  [/sion/g, 'ZH AH N'],
+  [/ough/g, 'AW'],
+  [/tch/g, 'CH'],
+  [/ph/g, 'F'],
+  [/gh/g, ''],
+  [/kn/g, 'N'], [/wr/g, 'R'], [/ck/g, 'K'],
+  [/qu/g, 'K W'],
+  [/th/g, 'TH'], [/sh/g, 'SH'], [/ch/g, 'CH'], [/ng/g, 'NG'],
+  [/oo/g, 'UW'], [/ee/g, 'IY'], [/ea/g, 'IY'], [/ie/g, 'IY'],
+  [/ou/g, 'AW'], [/ow/g, 'OW'], [/oi/g, 'OY'], [/oy/g, 'OY'],
+  [/ai/g, 'EY'], [/ay/g, 'EY'], [/ei/g, 'EY'], [/ey/g, 'EY'],
+  [/au/g, 'AW'], [/aw/g, 'AW'],
+
+  // English single letters
+  [/a/g, 'AH'], [/e/g, 'EH'], [/i/g, 'IY'], [/o/g, 'OH'], [/u/g, 'UW'],
+  [/b/g, 'B'], [/c/g, 'K'], [/d/g, 'D'], [/f/g, 'F'], [/g/g, 'G'],
+  [/h/g, 'HH'], [/j/g, 'JH'], [/k/g, 'K'], [/l/g, 'L'], [/m/g, 'M'],
+  [/n/g, 'N'], [/p/g, 'P'], [/q/g, 'K'], [/r/g, 'R'], [/s/g, 'S'],
+  [/t/g, 'T'], [/v/g, 'V'], [/w/g, 'W'], [/x/g, 'K S'], [/y/g, 'Y'],
+  [/z/g, 'Z'],
+];
+
+// Phoneme table — toned-down weights for natural mouth motion
+// (peaks ~0.55-0.7 for vowels, 0.25-0.45 for consonants)
+const PHONEME_TO_VISEME = {
+  // === Vowels ===
+  'AH':  { primary: 'AA', weight: 0.70, duration: 0.13 },
+  'OH':  { primary: 'O',  weight: 0.65, secondary: 'U',  secWeight: 0.10, duration: 0.13 },
+  'UW':  { primary: 'U',  weight: 0.70, secondary: 'O',  secWeight: 0.12, duration: 0.12 },
+  'EH':  { primary: 'E',  weight: 0.60, secondary: 'I',  secWeight: 0.08, duration: 0.11 },
+  'IY':  { primary: 'I',  weight: 0.55, secondary: 'E',  secWeight: 0.10, duration: 0.10 },
+  'IH':  { primary: 'I',  weight: 0.45, secondary: 'E',  secWeight: 0.18, duration: 0.10 },
+  // Iotated Russian
+  'YEH': { primary: 'E',  weight: 0.60, secondary: 'I',  secWeight: 0.25, duration: 0.12 },
+  'YOH': { primary: 'O',  weight: 0.65, secondary: 'I',  secWeight: 0.15, duration: 0.13 },
+  'YUW': { primary: 'U',  weight: 0.70, secondary: 'I',  secWeight: 0.18, duration: 0.12 },
+  'YAH': { primary: 'AA', weight: 0.65, secondary: 'I',  secWeight: 0.15, duration: 0.13 },
+  // Palatalized
+  'IY_AH': { primary: 'AA', weight: 0.60, secondary: 'I', secWeight: 0.25, duration: 0.13 },
+  'IY_EH': { primary: 'E',  weight: 0.55, secondary: 'I', secWeight: 0.30, duration: 0.12 },
+  'IY_OH': { primary: 'O',  weight: 0.60, secondary: 'I', secWeight: 0.22, duration: 0.13 },
+  'IY_UW': { primary: 'U',  weight: 0.65, secondary: 'I', secWeight: 0.22, duration: 0.12 },
+  // Diphthongs
+  'AW':  { primary: 'AA', weight: 0.55, secondary: 'U',  secWeight: 0.35, duration: 0.16 },
+  'AY':  { primary: 'AA', weight: 0.55, secondary: 'I',  secWeight: 0.30, duration: 0.16 },
+  'OY':  { primary: 'O',  weight: 0.55, secondary: 'I',  secWeight: 0.30, duration: 0.16 },
+  'OW':  { primary: 'O',  weight: 0.60, secondary: 'U',  secWeight: 0.28, duration: 0.15 },
+  'EY':  { primary: 'E',  weight: 0.55, secondary: 'I',  secWeight: 0.28, duration: 0.14 },
+
+  // === Bilabial — lips touch, subtle close ===
+  'B':   { primary: 'PP', weight: 0.55, duration: 0.07 },
+  'P':   { primary: 'PP', weight: 0.60, duration: 0.07 },
+  'M':   { primary: 'PP', weight: 0.50, duration: 0.09 },
+
+  // === Labiodental ===
+  'F':   { primary: 'FF', weight: 0.50, duration: 0.08 },
+  'V':   { primary: 'FF', weight: 0.45, duration: 0.07 },
+
+  // === Dental ===
+  'TH':  { primary: 'TH', weight: 0.40, duration: 0.07 },
+
+  // === Alveolar stops ===
+  'T':   { primary: 'DD', weight: 0.35, duration: 0.05 },
+  'D':   { primary: 'DD', weight: 0.35, duration: 0.05 },
+
+  // === Velar (invisible, keep very low) ===
+  'K':   { primary: 'KK', weight: 0.20, duration: 0.05 },
+  'G':   { primary: 'KK', weight: 0.20, duration: 0.05 },
+
+  // === Affricates/Postalveolar ===
+  'CH':  { primary: 'CH', weight: 0.45, duration: 0.09 },
+  'JH':  { primary: 'CH', weight: 0.40, duration: 0.09 },
+  'SH':  { primary: 'CH', weight: 0.40, secondary: 'SS', secWeight: 0.15, duration: 0.09 },
+  'SH_CH': { primary: 'CH', weight: 0.45, secondary: 'SS', secWeight: 0.20, duration: 0.10 },
+  'ZH':  { primary: 'CH', weight: 0.35, secondary: 'SS', secWeight: 0.15, duration: 0.08 },
+
+  // === Sibilants ===
+  'S':   { primary: 'SS', weight: 0.40, duration: 0.07 },
+  'Z':   { primary: 'SS', weight: 0.35, duration: 0.07 },
+  'TS':  { primary: 'SS', weight: 0.45, secondary: 'DD', secWeight: 0.18, duration: 0.08 },
+  'DZ':  { primary: 'SS', weight: 0.40, secondary: 'DD', secWeight: 0.15, duration: 0.08 },
+  'TS_AH': { primary: 'SS', weight: 0.40, secondary: 'AA', secWeight: 0.4, duration: 0.15 },
+  'TS_YAH': { primary: 'SS', weight: 0.40, secondary: 'AA', secWeight: 0.4, duration: 0.16 },
+
+  // === Nasals / Liquids ===
+  'N':   { primary: 'NN', weight: 0.35, duration: 0.06 },
+  'L':   { primary: 'NN', weight: 0.30, duration: 0.06 },
+  'NG':  { primary: 'NN', weight: 0.30, secondary: 'KK', secWeight: 0.10, duration: 0.07 },
+  'R':   { primary: 'RR', weight: 0.40, duration: 0.07 },
+
+  // === Others ===
+  'HH':  { primary: 'KK', weight: 0.12, duration: 0.05 },
+  'W':   { primary: 'U',  weight: 0.45, duration: 0.06 },
+  'Y':   { primary: 'I',  weight: 0.25, duration: 0.04 },
+};
+
+function wordToPhonemes(word) {
+  let work = word.toLowerCase();
+  let phonemes = [];
+  let i = 0;
+
+  while (i < work.length) {
+    let matched = false;
+    for (let len = 3; len >= 1; len--) {
+      const substr = work.substring(i, i + len);
+      for (const [regex, phoneme] of PHONEME_RULES) {
+        if (substr.match(new RegExp('^' + regex.source + '$'))) {
+          const parts = phoneme.split(' ');
+          for (const p of parts) {
+            if (p && PHONEME_TO_VISEME[p]) {
+              phonemes.push({ phoneme: p, ...PHONEME_TO_VISEME[p] });
+            }
+          }
+          i += len;
+          matched = true;
+          break;
+        }
+      }
+      if (matched) break;
+    }
+    if (!matched) i++;
+  }
+
+  return phonemes;
+}
+
+// ===== LOAD MODEL =====
+const loader = new GLTFLoader();
+loader.setMeshoptDecoder(MeshoptDecoder);
+const loadingEl = document.getElementById('loading');
+const loadingText = document.getElementById('loadingText');
+const statusEl = document.getElementById('status');
+
+function setStatus(text) { statusEl.textContent = text; }
+function fmt(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1048576).toFixed(2) + ' MB';
+}
+
+async function loadModelFromBlob(blob, filename) {
+  const t0 = performance.now();
+  const file = filename;
+  try {
+      loadingSpinner.style.display = 'block';
+      loadingText.style.display = 'block';
+      loadingText.textContent = `Loading ${file}...`;
+      dropZone.style.display = 'none';
+
+      assetSizes.model = blob.size;
+      document.getElementById('modelSize').textContent = fmt(blob.size);
+
+      const url = URL.createObjectURL(blob);
+      const gltf = await new Promise((resolve, reject) => {
+        loader.load(url, resolve, undefined, reject);
+      });
+      URL.revokeObjectURL(url);
+
+      model = gltf.scene;
+      scene.add(model);
+
+      // Don't play dance animations
+      if (gltf.animations?.length > 0) {
+        mixer = new THREE.AnimationMixer(model);
+        console.log(`${gltf.animations.length} animations found (not playing dance)`);
+      }
+
+      // Only apply external Kikyo textures if loading the Kikyo model
+      const isKikyo = file.toLowerCase().includes('kikyo');
+      const textures = {};
+      let texTotalSize = 0;
+
+      if (isKikyo) {
+        loadingText.textContent = 'Loading textures...';
+        const texLoader = new THREE.TextureLoader();
+        const texFiles = {
+          diffuse:   'WhatsApp Image 2026-04-05 at 14.41.19.jpeg',
+          ao:        'WhatsApp Image 2026-04-05 at 14.41.20.jpeg',
+          normal:    'WhatsApp Image 2026-04-05 at 14.41.20 (1).jpeg',
+          roughness: 'WhatsApp Image 2026-04-05 at 14.41.20 (2).jpeg',
+        };
+
+        for (const [type, filename] of Object.entries(texFiles)) {
+          try {
+            const tresp = await fetch('./' + filename);
+            const tblob = await tresp.blob();
+            texTotalSize += tblob.size;
+            const turl = URL.createObjectURL(tblob);
+            textures[type] = await new Promise((resolve, reject) => {
+              texLoader.load(turl, resolve, undefined, reject);
+            });
+            URL.revokeObjectURL(turl);
+            textures[type].colorSpace = type === 'diffuse' ? THREE.SRGBColorSpace : THREE.LinearSRGBColorSpace;
+            textures[type].flipY = false;
+          } catch (e) {
+            console.warn(`Texture ${type} failed:`, e);
+          }
+        }
+      }
+
+      assetSizes.textures = texTotalSize;
+      document.getElementById('texSize').textContent = texTotalSize > 0 ? fmt(texTotalSize) : 'embedded';
+      document.getElementById('totalSize').textContent = fmt(assetSizes.model + texTotalSize);
+
+      // Count triangles & ensure meshes visible (preserve embedded materials for non-Kikyo models)
+      let totalTris = 0;
+      model.traverse((child) => {
+        if (child.isMesh) {
+          child.visible = true;
+          child.frustumCulled = false;
+          totalTris += (child.geometry.index ? child.geometry.index.count / 3 : (child.geometry.attributes.position?.count || 0) / 3);
+
+          if (isKikyo) {
+            const oldMat = child.material;
+            child.material = new THREE.MeshStandardMaterial({
+              map: textures.diffuse || oldMat.map,
+              normalMap: textures.normal || oldMat.normalMap,
+              roughnessMap: textures.roughness || oldMat.roughnessMap,
+              aoMap: textures.ao || oldMat.aoMap,
+              roughness: 0.7,
+              metalness: 0.1,
+              side: THREE.DoubleSide,
+            });
+            if (textures.ao && child.geometry.attributes.uv) {
+              child.geometry.attributes.uv2 = child.geometry.attributes.uv;
+            }
+          } else {
+            // BS_Rig_Test has single grey material — apply nice skin tone
+            if (child.material) {
+              const mat = child.material;
+              mat.side = THREE.DoubleSide;
+
+              if (!mat.map) {
+                // No texture: colorize by material/mesh name, default skin tone
+                const lname = ((mat.name || '') + ' ' + child.name).toLowerCase();
+
+                if (lname.match(/hair|wig/)) {
+                  mat.color = new THREE.Color(0x3a2418);
+                  mat.roughness = 0.6;
+                } else if (lname.match(/eye|iris|pupil/)) {
+                  mat.color = new THREE.Color(0x2a4d6e);
+                  mat.roughness = 0.2;
+                } else if (lname.match(/teeth/)) {
+                  mat.color = new THREE.Color(0xf5e6d3);
+                } else if (lname.match(/lip|mouth/)) {
+                  mat.color = new THREE.Color(0xc97a6b);
+                } else if (lname.match(/cloth|shirt|dress/)) {
+                  mat.color = new THREE.Color(0x4a5568);
+                } else {
+                  // Default: warm skin tone with slight subsurface feel
+                  mat.color = new THREE.Color(0xf5d0b3);
+                  mat.roughness = 0.6;
+                  mat.metalness = 0.02;
+                  mat.emissive = new THREE.Color(0x2a1408);
+                  mat.emissiveIntensity = 0.08;
+                }
+                mat.needsUpdate = true;
+                console.log(`Colored "${mat.name || child.name}" -> #${mat.color.getHexString()}`);
+              }
+            }
+          }
+        }
+      });
+      document.getElementById('triCount').textContent = Math.round(totalTris).toLocaleString();
+
+      // Index-based mapping for BS_Rig_Test (blend shapes exported without names)
+      const BS_RIG_ORDER = [
+        'PP', 'E', 'O', 'I', 'CH', 'RR', 'KK', 'TH', 'NN', 'AA',
+        'SS', 'U', 'DD', 'FF', 'Charisma', 'Smile', 'Surpriced_O',
+        'Blinking', 'Surpriced_Normal'
+      ];
+      const isBSRig = file.toLowerCase().includes('bs_rig');
+
+      // Map morph targets
+      const allShapes = [];
+      model.traverse((child) => {
+        if (child.isMesh && child.morphTargetDictionary) {
+          morphMeshes.push(child);
+          for (const [name, idx] of Object.entries(child.morphTargetDictionary)) {
+            // BS_Rig uses numeric names — remap via position
+            let displayName = name;
+            if (isBSRig && /^\d+$/.test(name)) {
+              const i = parseInt(name);
+              if (i < BS_RIG_ORDER.length) {
+                displayName = BS_RIG_ORDER[i];
+              }
+            }
+
+            const mapped = VISEME_NAMES[displayName] || displayName;
+            morphMap[mapped] = { mesh: child, index: idx, name: displayName };
+            morphMap[displayName] = { mesh: child, index: idx, name: displayName };
+            // Also keep raw numeric access
+            if (displayName !== name) morphMap[name] = { mesh: child, index: idx, name };
+
+            allShapes.push({ name: displayName, mesh: child, index: idx });
+          }
+        }
+      });
+      console.log('All shapes:', allShapes.map(s => s.name));
+
+      buildTesterPanel(allShapes);
+
+      // Compute raw bounds
+      model.updateMatrixWorld(true);
+      const rawBox = new THREE.Box3().setFromObject(model);
+      const rawSize = rawBox.getSize(new THREE.Vector3());
+      const rawCenter = rawBox.getCenter(new THREE.Vector3());
+      console.log('Raw bounds (includes bones):', {
+        size: [rawSize.x.toFixed(2), rawSize.y.toFixed(2), rawSize.z.toFixed(2)],
+        min: [rawBox.min.x.toFixed(2), rawBox.min.y.toFixed(2), rawBox.min.z.toFixed(2)],
+        max: [rawBox.max.x.toFixed(2), rawBox.max.y.toFixed(2), rawBox.max.z.toFixed(2)],
+      });
+
+      // Compute bounds from mesh geometry only (excludes bones/helpers)
+      const meshBox = new THREE.Box3();
+      model.traverse((child) => {
+        if (child.isMesh && child.geometry) {
+          if (!child.geometry.boundingBox) child.geometry.computeBoundingBox();
+          const b = child.geometry.boundingBox.clone();
+          b.applyMatrix4(child.matrixWorld);
+          meshBox.union(b);
+        }
+      });
+      const meshSize = meshBox.getSize(new THREE.Vector3());
+      console.log('Mesh-only bounds:', {
+        size: [meshSize.x.toFixed(2), meshSize.y.toFixed(2), meshSize.z.toFixed(2)],
+      });
+
+      // Use mesh-only box for scaling
+      const srcBox = meshSize.y > 0.01 ? meshBox : rawBox;
+      const srcSize = meshSize.y > 0.01 ? meshSize : rawSize;
+      const srcCenter = srcBox.getCenter(new THREE.Vector3());
+
+      // Scale to 1.7m tall (human size)
+      const targetHeight = 1.7;
+      const scale = targetHeight / srcSize.y;
+      model.scale.setScalar(scale);
+      model.updateMatrixWorld(true);
+
+      // Offset to place at origin, feet on ground
+      model.position.set(
+        -srcCenter.x * scale,
+        -srcBox.min.y * scale,
+        -srcCenter.z * scale,
+      );
+      model.updateMatrixWorld(true);
+
+      // Hard-coded ideal camera for a 1.7m character
+      const faceY = 1.55; // eye/face height
+      controls.target.set(0, faceY, 0);
+      camera.position.set(0, faceY, 0.7); // close up on face
+      camera.near = 0.01;
+      camera.far = 100;
+      camera.fov = 35;
+      camera.updateProjectionMatrix();
+      controls.minDistance = 0.1;
+      controls.maxDistance = 10;
+      controls.update();
+      console.log('Camera:', camera.position, 'target:', controls.target);
+
+      // Done loading
+      const loadMs = performance.now() - t0;
+      document.getElementById('loadTime').textContent = (loadMs / 1000).toFixed(2) + 's';
+      setStatus('Ready');
+      loadingEl.classList.add('hidden');
+      return;
+
+    } catch (err) {
+      console.error(`Failed to load ${file}:`, err);
+      loadingText.textContent = `Failed to load: ${err.message || err}`;
+      loadingSpinner.style.display = 'none';
+      dropZone.style.display = 'block';
+      return;
+    }
+}
+
+// ===== FILE PICKER / DROP ZONE =====
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+const pickBtn = document.getElementById('pickBtn');
+const loadingSpinner = document.getElementById('loadSpinner');
+
+async function handleFile(file) {
+  if (!file) return;
+  if (!file.name.toLowerCase().match(/\.(glb|gltf)$/)) {
+    alert('Please provide a .glb or .gltf file');
+    return;
+  }
+
+  // Reset state for a new model
+  if (model) {
+    scene.remove(model);
+    model = null;
+  }
+  morphMeshes = [];
+  morphMap = {};
+  visemeState && Object.keys(visemeState).forEach(k => delete visemeState[k]);
+  manualOverrides && Object.keys(manualOverrides).forEach(k => delete manualOverrides[k]);
+
+  await loadModelFromBlob(file, file.name);
+}
+
+pickBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  fileInput.click();
+});
+dropZone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', (e) => {
+  if (e.target.files[0]) handleFile(e.target.files[0]);
+});
+
+// Drag & drop
+dropZone.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  dropZone.style.borderColor = '#a78bfa';
+  dropZone.style.background = 'rgba(108, 99, 255, 0.15)';
+});
+dropZone.addEventListener('dragleave', () => {
+  dropZone.style.borderColor = '#6c63ff';
+  dropZone.style.background = 'rgba(108, 99, 255, 0.05)';
+});
+dropZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropZone.style.borderColor = '#6c63ff';
+  dropZone.style.background = 'rgba(108, 99, 255, 0.05)';
+  if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+});
+
+// Also allow dropping anywhere on the page
+window.addEventListener('dragover', (e) => e.preventDefault());
+window.addEventListener('drop', (e) => {
+  e.preventDefault();
+  if (e.dataTransfer.files[0] && loadingEl.classList.contains('hidden')) {
+    // Replace existing model
+    loadingEl.classList.remove('hidden');
+    handleFile(e.dataTransfer.files[0]);
+  }
+});
+
+// ===== EVENT-DRIVEN LIP SYNC ENGINE =====
+const manualOverrides = {};   // user panel sliders
+const emotionState = {};      // auto emotions during speech
+
+// Viseme state with asymmetric lerp (fast open, slower close)
+const visemeState = {};
+const LERP_UP = 22;
+const LERP_DOWN = 8;
+const EMO_LERP = 3; // slow smooth emotion transitions
+
+function setViseme(name, target) {
+  if (!visemeState[name]) visemeState[name] = { current: 0, target: 0 };
+  // Accumulate within a tick (clearVisemes zeros target each tick)
+  visemeState[name].target += target;
+}
+
+function setEmotion(name, target) {
+  if (!emotionState[name]) emotionState[name] = { current: 0, target: 0, base: 0 };
+  emotionState[name].target = target;
+  emotionState[name].base = target;
+}
+
+function clearVisemes() {
+  for (const v of Object.values(visemeState)) v.target = 0;
+}
+
+function clearEmotions() {
+  for (const v of Object.values(emotionState)) { v.target = 0; v.base = 0; }
+}
+
+function applyVisemes(dt) {
+  // Update emotion state (slower lerp)
+  for (const [name, state] of Object.entries(emotionState)) {
+    state.current += (state.target - state.current) * Math.min(1, dt * EMO_LERP);
+    if (Math.abs(state.current) < 0.001) state.current = 0;
+  }
+
+  // Update viseme state (fast lerp, additive with emotion + manual)
+  const allNames = new Set([
+    ...Object.keys(visemeState),
+    ...Object.keys(emotionState),
+    ...Object.keys(manualOverrides),
+  ]);
+
+  for (const name of allNames) {
+    const vs = visemeState[name];
+    if (vs) {
+      const speed = vs.target > vs.current ? LERP_UP : LERP_DOWN;
+      vs.current += (vs.target - vs.current) * Math.min(1, dt * speed);
+      if (Math.abs(vs.current) < 0.001) vs.current = 0;
+    }
+
+    const m = morphMap[name];
+    if (m) {
+      const viseme = vs?.current || 0;
+      const emotion = emotionState[name]?.current || 0;
+      const manual = manualOverrides[name] || 0;
+      m.mesh.morphTargetInfluences[m.index] = Math.min(1, viseme + emotion + manual);
+    }
+  }
+}
+
+// ===== TESTER PANEL =====
+const VISEME_KEYS = ['AA', 'E', 'I', 'O', 'U', 'PP', 'FF', 'TH', 'DD', 'KK', 'CH', 'SS', 'NN', 'RR'];
+const EMOTION_HINTS = ['smile', 'charisma', 'surpri', 'blink', 'angry', 'sad', 'happy'];
+
+function isEmotionShape(name) {
+  const lower = name.toLowerCase();
+  return EMOTION_HINTS.some(h => lower.includes(h));
+}
+
+function isVisemeShape(name) {
+  return VISEME_KEYS.includes(name) || name.toLowerCase().includes('viseme') || name.startsWith('vrc.v_');
+}
+
+function buildTesterPanel(shapes) {
+  const panel = document.getElementById('shapeSliders');
+  const quickContainer = document.getElementById('quickVisemes');
+  document.getElementById('shapeCount').textContent = `${shapes.length} shapes`;
+
+  panel.innerHTML = '';
+  quickContainer.innerHTML = '';
+
+  // Quick viseme test buttons (momentary on hold)
+  const header = document.createElement('div');
+  header.style.cssText = 'width:100%; color:#888; font-size:10px; margin-bottom:4px;';
+  header.textContent = 'HOLD to test viseme:';
+  quickContainer.appendChild(header);
+
+  for (const v of VISEME_KEYS) {
+    if (!morphMap[v]) continue;
+    const btn = document.createElement('button');
+    btn.className = 'vbtn';
+    btn.textContent = v;
+    const hold = (on) => {
+      manualOverrides[v] = on ? 1.0 : 0;
+      const slider = document.getElementById(`slider_${v}`);
+      const val = document.getElementById(`val_${v}`);
+      if (slider) { slider.value = on ? 1 : 0; }
+      if (val) { val.textContent = (on ? 1 : 0).toFixed(2); }
+    };
+    btn.onmousedown = () => hold(true);
+    btn.onmouseup = () => hold(false);
+    btn.onmouseleave = () => hold(false);
+    btn.ontouchstart = (e) => { e.preventDefault(); hold(true); };
+    btn.ontouchend = () => hold(false);
+    quickContainer.appendChild(btn);
+  }
+
+  // Group: visemes first, emotions, then others
+  const viseme = shapes.filter(s => isVisemeShape(s.name));
+  const emotion = shapes.filter(s => !isVisemeShape(s.name) && isEmotionShape(s.name));
+  const other = shapes.filter(s => !isVisemeShape(s.name) && !isEmotionShape(s.name));
+
+  const addSection = (title, list, className = '') => {
+    if (list.length === 0) return;
+    const section = document.createElement('div');
+    section.className = 'section';
+    const h = document.createElement('div');
+    h.style.cssText = 'color:#888; font-size:10px; text-transform:uppercase; margin-bottom:4px;';
+    h.textContent = title;
+    section.appendChild(h);
+
+    for (const s of list) {
+      const row = document.createElement('div');
+      row.className = 'row';
+      const mapped = VISEME_NAMES[s.name] || s.name;
+      row.innerHTML = `
+        <div class="name ${className}">${s.name}</div>
+        <input type="range" min="0" max="1" step="0.01" value="0" id="slider_${mapped}" data-raw="${s.name}">
+        <div class="val" id="val_${mapped}">0.00</div>
+      `;
+      section.appendChild(row);
+      const slider = row.querySelector('input');
+      const val = row.querySelector('.val');
+      slider.addEventListener('input', () => {
+        const v = parseFloat(slider.value);
+        val.textContent = v.toFixed(2);
+        manualOverrides[mapped] = v;
+      });
+    }
+    panel.appendChild(section);
+  };
+
+  addSection('Visemes', viseme);
+  addSection('Emotions', emotion, 'emotion');
+  addSection('Other', other);
+}
+
+// Reset button
+document.getElementById('resetShapes').addEventListener('click', () => {
+  for (const k of Object.keys(manualOverrides)) manualOverrides[k] = 0;
+  document.querySelectorAll('#shapeSliders input[type=range]').forEach(s => {
+    s.value = 0;
+    const valEl = document.getElementById('val_' + s.id.replace('slider_', ''));
+    if (valEl) valEl.textContent = '0.00';
+  });
+  // Also clear morph influences that might have been set
+  for (const [name, m] of Object.entries(morphMap)) {
+    if (visemeState[name]) visemeState[name].current = 0;
+    m.mesh.morphTargetInfluences[m.index] = 0;
+  }
+});
+
+// Toggle panel
+document.getElementById('togglePanel').addEventListener('click', () => {
+  document.getElementById('testPanel').classList.remove('hidden');
+});
+// Add close button to panel via keyboard shortcut: H
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'h' || e.key === 'H') {
+    document.getElementById('testPanel').classList.toggle('hidden');
+  }
+});
+
+// Active word animation state
+let speaking = false;
+let currentWordPhonemes = [];
+let wordStartTime = 0;
+let wordDuration = 0;
+let avgWordDuration = 0.35;
+let lastBoundaryTime = 0;
+let lastBoundaryChar = 0;
+let speechStartTime = 0;
+let charsPerSecond = 15; // updated from boundary events
+
+// Pre-computed phonemes per word (indexed by charIndex)
+let wordPhonemeCache = {};
+let fullText = '';
+
+function prepareWords(text) {
+  fullText = text;
+  wordPhonemeCache = {};
+  // Find each word's start index and compute its phonemes
+  const regex = /[a-zA-Zа-яёА-ЯЁ]+/g;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    wordPhonemeCache[match.index] = {
+      word: match[0],
+      phonemes: wordToPhonemes(match[0]),
+    };
+  }
+}
+
+// Current word's phoneme schedule: [{start, end, phoneme}]
+let phonemeSchedule = [];
+const ANTICIPATION = 0.05; // seconds — lips move slightly BEFORE sound
+
+function startWord(charIndex) {
+  // Find the word at or near this charIndex
+  let best = null;
+  let bestDist = Infinity;
+  for (const [idx, data] of Object.entries(wordPhonemeCache)) {
+    const d = Math.abs(parseInt(idx) - charIndex);
+    if (d < bestDist) { bestDist = d; best = data; }
+  }
+
+  if (!best || best.phonemes.length === 0) {
+    phonemeSchedule = [];
+    return;
+  }
+
+  currentWordPhonemes = best.phonemes;
+
+  // Estimate THIS word's actual duration from its char count and TTS rate
+  // Most languages speak at ~12-18 chars/sec
+  const charCount = best.word.length;
+  // Word duration: time to speak these chars + small gap after
+  const wordDur = (charCount / Math.max(charsPerSecond, 5)) + 0.05;
+
+  // Build schedule — each phoneme gets time proportional to its intrinsic duration
+  const totalIntrinsic = best.phonemes.reduce((s, p) => s + p.duration, 0);
+  const scale = wordDur / Math.max(totalIntrinsic, 0.01);
+
+  const now = performance.now() / 1000;
+  wordStartTime = now - ANTICIPATION;
+  wordDuration = wordDur;
+
+  phonemeSchedule = [];
+  let t = 0;
+  for (const p of best.phonemes) {
+    const dur = p.duration * scale;
+    phonemeSchedule.push({ start: t, end: t + dur, phoneme: p });
+    t += dur;
+  }
+
+  document.getElementById('lsStatus').textContent = `"${best.word}" (${(wordDur*1000).toFixed(0)}ms, ${charsPerSecond.toFixed(1)}cps)`;
+}
+
+function getPhonemeAt(elapsed) {
+  // Binary-ish search
+  for (let i = 0; i < phonemeSchedule.length; i++) {
+    if (elapsed >= phonemeSchedule[i].start && elapsed < phonemeSchedule[i].end) {
+      return { index: i, slot: phonemeSchedule[i] };
+    }
+  }
+  return null;
+}
+
+function tickLipSync() {
+  if (!speaking) return;
+
+  clearVisemes();
+
+  if (phonemeSchedule.length === 0) return;
+
+  const elapsed = (performance.now() / 1000) - wordStartTime;
+  const total = phonemeSchedule[phonemeSchedule.length - 1].end;
+
+  if (elapsed >= total) {
+    // Hold neutral at end of word
+    return;
+  }
+
+  // Find current and neighboring phonemes
+  const current = getPhonemeAt(elapsed);
+  if (!current) return;
+
+  const slot = current.slot;
+  const prev = current.index > 0 ? phonemeSchedule[current.index - 1] : null;
+  const next = current.index < phonemeSchedule.length - 1 ? phonemeSchedule[current.index + 1] : null;
+
+  const dur = slot.end - slot.start;
+  const local = Math.max(0, Math.min(1, (elapsed - slot.start) / dur));
+
+  // Approach: continuous linear blend between (prev, current, next)
+  // based on where we are in the schedule, using half-durations.
+  const p = slot.phoneme;
+  const CROSSFADE = 0.4; // fraction of phoneme duration devoted to each crossfade edge
+
+  // Current weight: peak at middle, fade to 0.5 at edges
+  let curW;
+  if (local < CROSSFADE) {
+    const a = local / CROSSFADE;
+    curW = 0.5 + 0.5 * (a * a * (3 - 2 * a)); // ease-in from 0.5 to 1.0
+  } else if (local < (1 - CROSSFADE)) {
+    curW = 1.0;
+  } else {
+    const a = (local - (1 - CROSSFADE)) / CROSSFADE;
+    const es = a * a * (3 - 2 * a);
+    curW = 1.0 - 0.5 * es; // ease-out from 1.0 to 0.5
+  }
+
+  setViseme(p.primary, p.weight * curW);
+  if (p.secondary) setViseme(p.secondary, p.secWeight * curW);
+
+  // PREV: only contributes in first CROSSFADE window, fading out from 0.5→0
+  if (prev && local < CROSSFADE) {
+    const a = 1 - (local / CROSSFADE);
+    const blend = a * a * (3 - 2 * a);
+    const pp = prev.phoneme;
+    setViseme(pp.primary, pp.weight * blend * 0.5);
+    if (pp.secondary) setViseme(pp.secondary, pp.secWeight * blend * 0.3);
+  }
+
+  // NEXT: only contributes in last CROSSFADE window, fading in from 0→0.5
+  if (next && local > (1 - CROSSFADE)) {
+    const a = (local - (1 - CROSSFADE)) / CROSSFADE;
+    const blend = a * a * (3 - 2 * a);
+    const np = next.phoneme;
+    setViseme(np.primary, np.weight * blend * 0.5);
+    if (np.secondary) setViseme(np.secondary, np.secWeight * blend * 0.3);
+  }
+}
+
+// ===== SPEECH SYNTHESIS =====
+const synth = window.speechSynthesis;
+const voiceSelect = document.getElementById('voiceSelect');
+let voices = [];
+
+function populateVoices() {
+  voices = synth.getVoices();
+  voiceSelect.innerHTML = '';
+  [...voices].sort((a, b) => {
+    const aRu = a.lang.startsWith('ru') ? 0 : 1;
+    const bRu = b.lang.startsWith('ru') ? 0 : 1;
+    return aRu - bRu;
+  }).forEach(voice => {
+    const opt = document.createElement('option');
+    opt.value = voices.indexOf(voice);
+    opt.textContent = `${voice.name} (${voice.lang})`;
+    voiceSelect.appendChild(opt);
+  });
+}
+synth.onvoiceschanged = populateVoices;
+populateVoices();
+
+// ===== EMOTION ANALYZER =====
+// Each emotion produces a DISTINCT face configuration.
+// Priority high → low: shock > surprise > happy > confident > sad > calm > neutral
+const EMOTION_PROFILES = {
+  // Intense shock/disbelief — wide open "O" mouth
+  shock: {
+    priority: 100,
+    triggers: /\b(ужас|кошмар|шок|катастрофа|боже мой|о боже|о нет|не может быть|чёрт|блин|wtf|damn|oh no|shock|horrible|terrible|nightmare|shit|fuck)\w*/gi,
+    face: { Surpriced_O: 0.95, Surpriced_Normal: 0.55, Smile: 0.0, Charisma: 0.1 }
+  },
+  // Surprise — raised brows, slight mouth open
+  surprise: {
+    priority: 90,
+    triggers: /\b(вау|ого|омг|ничего себе|невероятно|неожиданно|внезапно|удивительно|поразительно|ну ничего|wow|omg|oh my|incredible|unbelievable|surprise|unexpected|whoa|no way|really)\w*/gi,
+    face: { Surpriced_Normal: 0.85, Surpriced_O: 0.25, Smile: 0.15, Charisma: 0.3 }
+  },
+  // Excited happy — big smile + raised brows
+  excited: {
+    triggers: /\b(ура|супер|класс|офигенно|восторг|восхитительно|fantastic|awesome|incredible|brilliant|yay|woohoo)\w*/gi,
+    priority: 85,
+    face: { Smile: 0.95, Charisma: 0.7, Surpriced_Normal: 0.35 }
+  },
+  // Happy — warm smile
+  happy: {
+    priority: 80,
+    triggers: /\b(люблю|обожаю|счастлив|рад[ау]?я?|рада|классно|отлично|прекрасно|замечательно|чудесно|здорово|love|happy|great|wonderful|excellent|cool|nice|good|delight|joy)\w*/gi,
+    face: { Smile: 0.85, Charisma: 0.55 }
+  },
+  // Confident/assertive — strong presence, tight lips
+  confident: {
+    priority: 70,
+    triggers: /\b(конечно|уверен[а]?|точно|определённо|обязательно|absolutely|definitely|certainly|sure|exactly|indeed|obviously|without doubt)\w*/gi,
+    face: { Charisma: 0.9, Smile: 0.15 }
+  },
+  // Sad — no smile, low energy
+  sad: {
+    priority: 60,
+    triggers: /\b(грустно|печально|жаль|плохо|устал[а]?|одиноко|расстроен[а]?|sad|unhappy|sorry|miserable|depressed|tired|lonely|miss)\w*/gi,
+    face: { Smile: 0.0, Charisma: 0.1, Blinking: 0.15 }
+  },
+  // Question — slight surprise, engaged
+  question: {
+    priority: 40,
+    triggers: /\?/g,
+    face: { Surpriced_Normal: 0.45, Charisma: 0.4, Smile: 0.1 }
+  },
+  // Exclamation (generic emphasis without specific keyword)
+  exclamation: {
+    priority: 35,
+    triggers: /!/g,
+    face: { Charisma: 0.6, Smile: 0.3, Surpriced_Normal: 0.3 }
+  },
+  // Calm statement — relaxed
+  calm: {
+    priority: 20,
+    triggers: /\b(спокойно|тихо|мирно|уютно|приятно|calm|quiet|peaceful|gentle|soft|relax|nice weather)\w*/gi,
+    face: { Smile: 0.2, Charisma: 0.3 }
+  },
+};
+
+// Default neutral face (for sentences without any emotional cue)
+const NEUTRAL_FACE = { Charisma: 0.15, Smile: 0.0 };
+
+function analyzeEmotions(text) {
+  const sentRe = /[^.!?…]+[.!?…]?/g;
+  const ranges = [];
+  let pos = 0;
+  const sentences = text.match(sentRe) || [text];
+
+  for (const sentence of sentences) {
+    const start = text.indexOf(sentence, pos);
+    if (start < 0) continue;
+    const end = start + sentence.length;
+    pos = end;
+
+    // Find all matching emotions with their match counts
+    const matches = [];
+    for (const [name, profile] of Object.entries(EMOTION_PROFILES)) {
+      const m = sentence.match(profile.triggers);
+      if (m) matches.push({ name, profile, count: m.length });
+    }
+
+    // Pick dominant = highest priority, ties broken by count
+    matches.sort((a, b) => {
+      if (b.profile.priority !== a.profile.priority) return b.profile.priority - a.profile.priority;
+      return b.count - a.count;
+    });
+
+    let face;
+    let dominantName = 'neutral';
+
+    if (matches.length > 0) {
+      const winner = matches[0];
+      dominantName = winner.name;
+      // Intensify if multiple hits of same emotion category
+      const mult = Math.min(1.0, 1.0 + (winner.count - 1) * 0.12);
+      face = {};
+      for (const [k, v] of Object.entries(winner.profile.face)) {
+        face[k] = Math.min(1.0, v * mult);
+      }
+    } else {
+      face = { ...NEUTRAL_FACE };
+    }
+
+    ranges.push({ start, end, emotions: face, dominant: dominantName, text: sentence });
+    console.log(`[emotion] "${sentence.trim()}" → ${dominantName}`, face);
+  }
+
+  return ranges;
+}
+
+let emotionRanges = [];
+
+function updateEmotionsForChar(charIndex) {
+  // Find active range
+  const range = emotionRanges.find(r => charIndex >= r.start && charIndex < r.end) || emotionRanges[0];
+  if (!range) return;
+
+  // Clear then set from range
+  clearEmotions();
+  for (const [name, weight] of Object.entries(range.emotions)) {
+    // Only set if this emotion exists in the model
+    if (morphMap[name]) {
+      setEmotion(name, weight);
+    }
+  }
+}
+
+function speak(text) {
+  if (synth.speaking) synth.cancel();
+
+  const utt = new SpeechSynthesisUtterance(text);
+  if (voiceSelect.value) utt.voice = voices[parseInt(voiceSelect.value)];
+  utt.rate = 0.9;
+  utt.pitch = 1.0;
+
+  prepareWords(text);
+  // emotionRanges = analyzeEmotions(text); // disabled — phoneme-only mode
+
+  utt.onstart = () => {
+    speaking = true;
+    lastBoundaryTime = performance.now() / 1000;
+    lastBoundaryChar = 0;
+    speechStartTime = performance.now() / 1000;
+    charsPerSecond = 15;
+    startWord(0);
+    setStatus('Speaking...');
+  };
+
+  // Track speech rate and animate each word
+  utt.onboundary = (ev) => {
+    if (ev.name === 'word') {
+      const now = performance.now() / 1000;
+      const gap = now - lastBoundaryTime;
+      const charGap = ev.charIndex - lastBoundaryChar;
+
+      // Update chars-per-second from real TTS rate
+      if (gap > 0.02 && charGap > 0) {
+        const cps = charGap / gap;
+        if (cps > 3 && cps < 50) {
+          charsPerSecond = charsPerSecond * 0.5 + cps * 0.5;
+        }
+      }
+      lastBoundaryTime = now;
+      lastBoundaryChar = ev.charIndex;
+
+      startWord(ev.charIndex);
+    }
+  };
+
+  utt.onend = () => {
+    setTimeout(() => {
+      speaking = false;
+      currentWordPhonemes = [];
+      clearVisemes();
+      clearEmotions();
+      document.getElementById('lsStatus').textContent = 'idle';
+      setStatus('Ready');
+      document.getElementById('speakBtn').disabled = false;
+    }, 200);
+  };
+
+  utt.onerror = (e) => {
+    console.error('TTS error:', e.error);
+    speaking = false;
+    currentWordPhonemes = [];
+    clearVisemes();
+    clearEmotions();
+    setStatus('Speech error: ' + e.error);
+    document.getElementById('speakBtn').disabled = false;
+  };
+
+  document.getElementById('speakBtn').disabled = true;
+  synth.speak(utt);
+}
+
+// UI
+document.getElementById('speakBtn').onclick = () => {
+  const t = document.getElementById('textInput').value.trim();
+  if (t) speak(t);
+};
+document.getElementById('textInput').onkeydown = (e) => {
+  if (e.key === 'Enter') {
+    const t = e.target.value.trim();
+    if (t) speak(t);
+  }
+};
+
+// ===== IDLE =====
+let idleT = 0;
+function idleAnimation(dt) {
+  if (speaking) return;
+  idleT += dt;
+
+  if (morphMap['AA']) {
+    const m = morphMap['AA'];
+    m.mesh.morphTargetInfluences[m.index] = Math.sin(idleT * 1.5) * 0.015 + 0.015;
+  }
+  if (morphMap['BLINK']) {
+    const m = morphMap['BLINK'];
+    const cycle = idleT % 3.5;
+    let w = 0;
+    if (cycle > 3.2) {
+      const t = (cycle - 3.2) / 0.3;
+      w = t < 0.5 ? t * 2 : (1 - t) * 2;
+    }
+    m.mesh.morphTargetInfluences[m.index] = w;
+  }
+}
+
+// ===== FPS COUNTER =====
+let fpsFrames = 0;
+let fpsLastTime = performance.now();
+const fpsEl = document.getElementById('fpsVal');
+const frameTimeEl = document.getElementById('frameTime');
+const drawCallsEl = document.getElementById('drawCalls');
+
+function updateFPS() {
+  fpsFrames++;
+  const now = performance.now();
+  const delta = now - fpsLastTime;
+  if (delta >= 500) {
+    const fps = Math.round(fpsFrames / (delta / 1000));
+    fpsEl.textContent = fps;
+    fpsEl.className = fps >= 55 ? 'value good' : fps >= 30 ? 'value warn' : 'value bad';
+    frameTimeEl.textContent = (delta / fpsFrames).toFixed(1) + 'ms';
+    fpsFrames = 0;
+    fpsLastTime = now;
+
+    // Draw calls
+    const info = renderer.info.render;
+    drawCallsEl.textContent = info.calls;
+  }
+}
+
+// ===== RENDER LOOP =====
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = clock.getDelta();
+
+  if (mixer) mixer.update(dt);
+  controls.update();
+
+  tickLipSync();
+  applyVisemes(dt);
+  idleAnimation(dt);
+
+  renderer.render(scene, camera);
+  updateFPS();
+}
+animate();
+
+// Resize
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// Page load time
+window.addEventListener('load', () => {
+  const total = performance.now() - PAGE_START;
+  console.log(`Page ready in ${(total/1000).toFixed(2)}s`);
+});
+
+</script>
+</body>
+</html>
