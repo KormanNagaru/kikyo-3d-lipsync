@@ -64,6 +64,24 @@ body {
   transition: opacity 0.5s;
 }
 #loading.hidden { opacity: 0; pointer-events: none; }
+#replaceBtn {
+  position: fixed;
+  top: 42px;
+  right: 10px;
+  padding: 5px 14px;
+  background: rgba(30, 30, 60, 0.82);
+  border: 1px solid rgba(108,99,255,0.3);
+  border-radius: 8px;
+  color: #666;
+  font-size: 11px;
+  font-family: 'Segoe UI', sans-serif;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+  z-index: 10;
+  display: none;
+  transition: border-color 0.15s, color 0.15s;
+}
+#replaceBtn:hover { border-color: #6c63ff; color: #a78bfa; }
 .spinner {
   width: 50px; height: 50px;
   border: 4px solid #333;
@@ -313,6 +331,7 @@ body {
 <body>
 
 <div id="loading">
+  <!-- Drop zone: hidden on startup, shown only as fallback if auto-load fails -->
   <div id="dropZone" style="
     border: 2px dashed #6c63ff;
     border-radius: 16px;
@@ -321,6 +340,7 @@ body {
     background: rgba(108, 99, 255, 0.05);
     transition: all 0.2s;
     cursor: pointer;
+    display: none;
   ">
     <div style="font-size: 48px; margin-bottom: 16px;">📦</div>
     <h2 style="margin-bottom: 12px; color: #a78bfa;">Drop your GLB file here</h2>
@@ -335,10 +355,10 @@ body {
       cursor: pointer;
       font-weight: 600;
     ">Choose GLB File</button>
-    <input type="file" id="fileInput" accept=".glb,.gltf" style="display: none;">
   </div>
-  <p id="loadingText" style="margin-top: 20px; color: #666; display: none;"></p>
-  <div class="spinner" style="display: none;" id="loadSpinner"></div>
+  <p id="loadingText" style="margin-top: 20px; color: #aaa;">Loading model...</p>
+  <div class="spinner" id="loadSpinner"></div>
+  <input type="file" id="fileInput" accept=".glb,.gltf" style="display: none;">
 </div>
 
 <div id="stats">
@@ -354,6 +374,7 @@ body {
 </div>
 
 <div id="status">Ready</div>
+<button id="replaceBtn" title="Load a different GLB model">📂 Replace model</button>
 
 <div id="testPanel">
   <h3>Blendshape Tester <span class="sub" id="shapeCount"></span></h3>
@@ -754,6 +775,7 @@ async function loadModelFromBlob(blob, filename) {
       loadingText.style.display = 'block';
       loadingText.textContent = `Loading ${file}...`;
       dropZone.style.display = 'none';
+      document.getElementById('replaceBtn').style.display = 'none';
 
       assetSizes.model = blob.size;
       document.getElementById('modelSize').textContent = fmt(blob.size);
@@ -917,7 +939,7 @@ async function loadModelFromBlob(blob, filename) {
       faceCtrl = new FaceController(
         new Map(Object.entries(morphMap)),
         jawBone,
-        { blinkShape }
+        { blinkShape, jawMaxDeg: 0 }  // jaw disabled — enable + set jawAxisV when axis is known
       );
       faceCtrl.manual = manualOverrides;
 
@@ -984,6 +1006,7 @@ async function loadModelFromBlob(blob, filename) {
       document.getElementById('loadTime').textContent = (loadMs / 1000).toFixed(2) + 's';
       setStatus('Ready');
       loadingEl.classList.add('hidden');
+      document.getElementById('replaceBtn').style.display = 'block';
       return;
 
     } catch (err) {
@@ -1124,6 +1147,11 @@ class FaceController {
     // Jaw
     this._jawCur = 0;
 
+    // Jaw delta rotation helpers (reused each frame — no allocation in hot path)
+    this._jawInitQuat = null;
+    this._jawDeltaQ   = new THREE.Quaternion();
+    this._jawAxisV    = new THREE.Vector3(1, 0, 0); // adjust axis if model needs Y or Z
+
     // Blink
     this._blinkCur    = 0;
     this._blinkTimer  = 0;
@@ -1214,7 +1242,14 @@ class FaceController {
     }
     const spd = tgt > this._jawCur ? this._cfg.jawRise : this._cfg.jawFall;
     this._jawCur += (tgt - this._jawCur) * Math.min(1, dt * spd);
-    if (this._jaw) this._jaw.rotation.x = -this._jawCur * this._cfg.jawMaxDeg * FC_DEG2RAD;
+
+    if (this._jaw && this._cfg.jawMaxDeg > 0) {
+      // Store initial bone orientation once — apply rotation as delta to avoid overriding rigged pose
+      if (!this._jawInitQuat) this._jawInitQuat = this._jaw.quaternion.clone();
+      const angle = -this._jawCur * this._cfg.jawMaxDeg * FC_DEG2RAD;
+      this._jawDeltaQ.setFromAxisAngle(this._jawAxisV, angle);
+      this._jaw.quaternion.copy(this._jawInitQuat).multiply(this._jawDeltaQ);
+    }
   }
 
   _stepBlink(dt) {
@@ -1873,6 +1908,27 @@ function animate() {
   updateFPS();
 }
 animate();
+
+// Auto-load default model on startup; show file picker only if none found
+async function autoLoadDefault() {
+  const candidates = ['KikyoNewTest.glb', 'KikyoNewTestAnimation.glb', 'BS_Rig_Test_V01_compressed.glb'];
+  for (const name of candidates) {
+    try {
+      const resp = await fetch('./' + encodeURIComponent(name));
+      if (!resp.ok) continue;
+      const blob = await resp.blob();
+      await loadModelFromBlob(blob, name);
+      return;
+    } catch {}
+  }
+  // No bundled model found — fall back to file picker UI
+  loadingText.style.display = 'none';
+  loadingSpinner.style.display = 'none';
+  dropZone.style.display = 'flex';
+}
+
+document.getElementById('replaceBtn').addEventListener('click', () => fileInput.click());
+autoLoadDefault();
 
 // Resize
 window.addEventListener('resize', () => {
