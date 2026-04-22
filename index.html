@@ -1010,15 +1010,16 @@ async function loadModelFromBlob(blob, filename) {
       model.updateMatrixWorld(true);
 
       // Frame the upper body (bust shot) for a 1.7m character
-      const faceY = 1.55;                    // eye/face height
+      // 85mm portrait lens → vertical FOV ≈ 16° on 24mm sensor equivalent
+      const faceY = 1.55;                     // eye/face height
       controls.target.set(0, faceY - 0.25, 0); // target lower — mid-chest
-      camera.position.set(0, faceY - 0.2, 3.6); // camera lowered slightly
-      camera.near = 0.01;
-      camera.far = 100;
-      camera.fov = 35;
+      camera.position.set(0, faceY - 0.2, 8.1); // pulled back to compensate for narrower FOV
+      camera.near = 0.1;
+      camera.far = 200;
+      camera.fov = 16;                        // 85mm-equivalent portrait
       camera.updateProjectionMatrix();
-      controls.minDistance = 0.3;
-      controls.maxDistance = 10;
+      controls.minDistance = 1.0;
+      controls.maxDistance = 25;
       controls.update();
       console.log('Camera:', camera.position, 'target:', controls.target);
 
