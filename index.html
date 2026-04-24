@@ -1042,21 +1042,8 @@ async function loadModelFromBlob(blob, filename) {
 }
 
 // ===== PERSISTENCE (Cloudflare R2 via /api/model) =====
-// All visitors share ONE active model. Replace/Delete are admin-only
-// (password sent in X-Admin-Pwd header, cached in sessionStorage).
+// All visitors share ONE active model. Open test page — no auth.
 const API_MODEL = '/api/model';
-const ADMIN_PWD_KEY = 'kikyo_admin_pwd';
-
-function getAdminPwd() {
-  let p = sessionStorage.getItem(ADMIN_PWD_KEY);
-  if (!p) {
-    p = prompt('Admin password required to replace the shared model:');
-    if (!p) return null;
-    sessionStorage.setItem(ADMIN_PWD_KEY, p);
-  }
-  return p;
-}
-function clearAdminPwd() { sessionStorage.removeItem(ADMIN_PWD_KEY); }
 
 async function remoteModelGet() {
   try {
@@ -1068,25 +1055,16 @@ async function remoteModelGet() {
   } catch (e) { console.warn('remoteModelGet failed:', e); return null; }
 }
 async function remoteModelPut(blob) {
-  const pwd = getAdminPwd();
-  if (!pwd) return { ok: false, error: 'cancelled' };
   const resp = await fetch(API_MODEL, {
     method:  'POST',
-    headers: { 'x-admin-pwd': pwd, 'content-type': 'model/gltf-binary' },
+    headers: { 'content-type': 'model/gltf-binary' },
     body:    blob,
   });
-  if (resp.status === 401) { clearAdminPwd(); return { ok: false, error: 'wrong password' }; }
   if (!resp.ok) return { ok: false, error: 'HTTP ' + resp.status };
   return { ok: true };
 }
 async function remoteModelDelete() {
-  const pwd = getAdminPwd();
-  if (!pwd) return { ok: false, error: 'cancelled' };
-  const resp = await fetch(API_MODEL, {
-    method:  'DELETE',
-    headers: { 'x-admin-pwd': pwd },
-  });
-  if (resp.status === 401) { clearAdminPwd(); return { ok: false, error: 'wrong password' }; }
+  const resp = await fetch(API_MODEL, { method: 'DELETE' });
   if (!resp.ok) return { ok: false, error: 'HTTP ' + resp.status };
   return { ok: true };
 }
