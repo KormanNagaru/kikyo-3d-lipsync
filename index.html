@@ -384,13 +384,22 @@ body {
 <div id="stats">
   <div><span class="label">FPS: </span><span id="fpsVal" class="value">--</span></div>
   <div><span class="label">Frame: </span><span id="frameTime" class="value">--</span></div>
+  <div><span class="label">CPU: </span><span id="cpuMs" class="value">--</span></div>
+  <div><span class="label">GPU: </span><span id="gpuMs" class="value">--</span></div>
+  <div><span class="label">JS heap: </span><span id="jsHeap" class="value">--</span></div>
+  <div><span class="label">Long tasks: </span><span id="longTasks" class="value">0</span></div>
+  <hr style="border:0; border-top:1px solid rgba(255,255,255,0.08); margin:6px 0;">
   <div><span class="label">Load time: </span><span id="loadTime" class="value">--</span></div>
   <div><span class="label">Model: </span><span id="modelSize" class="value">--</span></div>
   <div><span class="label">Textures: </span><span id="texSize" class="value">--</span></div>
   <div><span class="label">Total: </span><span id="totalSize" class="value">--</span></div>
   <div><span class="label">Triangles: </span><span id="triCount" class="value">--</span></div>
   <div><span class="label">Draw calls: </span><span id="drawCalls" class="value">--</span></div>
+  <div><span class="label">Programs: </span><span id="progCount" class="value">--</span></div>
+  <div><span class="label">Textures#: </span><span id="texCount" class="value">--</span></div>
+  <div><span class="label">Geometries: </span><span id="geomCount" class="value">--</span></div>
   <div><span class="label">Lip sync: </span><span id="lsStatus" class="value">idle</span></div>
+  <div id="gpuInfo" style="font-size:10px; color:#666; margin-top:6px; max-width:260px; word-break:break-word; line-height:1.3;"></div>
 </div>
 
 <div id="status">Ready</div>
@@ -2239,29 +2248,108 @@ function buildTuningPanel() {
 buildTuningPanel();
 
 
-// ===== FPS COUNTER =====
+// ===== PERF MONITORING =====
+// GPU timing via WebGL2 disjoint timer query (Chromium/Firefox; may be disabled
+// in Safari and some enterprise Chrome policies — we show "n/a" in that case).
+const _gl = renderer.getContext();
+const _timerExt = _gl.getExtension('EXT_disjoint_timer_query_webgl2');
+const _gpuQueries = [];
+let _lastGpuMs = 0;
+function gpuBeginFrame() {
+  if (!_timerExt) return null;
+  const q = _gl.createQuery();
+  _gl.beginQuery(_timerExt.TIME_ELAPSED_EXT, q);
+  return q;
+}
+function gpuEndFrame(q) {
+  if (!q) return;
+  _gl.endQuery(_timerExt.TIME_ELAPSED_EXT);
+  _gpuQueries.push(q);
+}
+function gpuPollResults() {
+  // Drain any queries whose results are now ready. Async by design — a query's
+  // result typically appears 1-2 frames after it was issued.
+  while (_gpuQueries.length) {
+    const q = _gpuQueries[0];
+    if (!_gl.getQueryParameter(q, _gl.QUERY_RESULT_AVAILABLE)) break;
+    const disjoint = _gl.getParameter(_timerExt.GPU_DISJOINT_EXT);
+    if (!disjoint) {
+      const ns = _gl.getQueryParameter(q, _gl.QUERY_RESULT);
+      _lastGpuMs = ns / 1e6;
+    }
+    _gl.deleteQuery(q);
+    _gpuQueries.shift();
+  }
+  return _lastGpuMs;
+}
+
+// GPU vendor / renderer string once at startup.
+const _dbgExt = _gl.getExtension('WEBGL_debug_renderer_info');
+if (_dbgExt) {
+  const vendor = _gl.getParameter(_dbgExt.UNMASKED_VENDOR_WEBGL);
+  const rend   = _gl.getParameter(_dbgExt.UNMASKED_RENDERER_WEBGL);
+  const gpuInfoEl = document.getElementById('gpuInfo');
+  if (gpuInfoEl) gpuInfoEl.textContent = `${vendor} · ${rend}`;
+}
+
+// Long-task observer — fires when the main thread is busy > 50 ms, i.e. jank.
+let _longTaskCount = 0;
+if (typeof PerformanceObserver !== 'undefined') {
+  try {
+    new PerformanceObserver((list) => { _longTaskCount += list.getEntries().length; })
+      .observe({ entryTypes: ['longtask'] });
+  } catch { /* not supported in this browser */ }
+}
+
+// ===== FPS + PERF COUNTER =====
 let fpsFrames = 0;
 let fpsLastTime = performance.now();
-const fpsEl = document.getElementById('fpsVal');
-const frameTimeEl = document.getElementById('frameTime');
-const drawCallsEl = document.getElementById('drawCalls');
+let _cpuSumMs   = 0;          // sum of per-frame animate() CPU time since last flush
+let _lastCpuMs  = 0;          // latest single-frame CPU time
+const fpsEl        = document.getElementById('fpsVal');
+const frameTimeEl  = document.getElementById('frameTime');
+const cpuMsEl      = document.getElementById('cpuMs');
+const gpuMsEl      = document.getElementById('gpuMs');
+const jsHeapEl     = document.getElementById('jsHeap');
+const longTasksEl  = document.getElementById('longTasks');
+const drawCallsEl  = document.getElementById('drawCalls');
+const progCountEl  = document.getElementById('progCount');
+const texCountEl   = document.getElementById('texCount');
+const geomCountEl  = document.getElementById('geomCount');
 
 function updateFPS() {
   fpsFrames++;
+  _cpuSumMs += _lastCpuMs;
   const now = performance.now();
   const delta = now - fpsLastTime;
-  if (delta >= 500) {
-    const fps = Math.round(fpsFrames / (delta / 1000));
-    fpsEl.textContent = fps;
-    fpsEl.className = fps >= 55 ? 'value good' : fps >= 30 ? 'value warn' : 'value bad';
-    frameTimeEl.textContent = (delta / fpsFrames).toFixed(1) + 'ms';
-    fpsFrames = 0;
-    fpsLastTime = now;
+  if (delta < 500) return;
 
-    // Draw calls
-    const info = renderer.info.render;
-    drawCallsEl.textContent = info.calls;
+  const fps = Math.round(fpsFrames / (delta / 1000));
+  fpsEl.textContent = fps;
+  fpsEl.className = fps >= 55 ? 'value good' : fps >= 30 ? 'value warn' : 'value bad';
+  frameTimeEl.textContent = (delta / fpsFrames).toFixed(1) + ' ms';
+  cpuMsEl.textContent     = (_cpuSumMs / fpsFrames).toFixed(2) + ' ms';
+
+  const gpuMs = gpuPollResults();
+  gpuMsEl.textContent = _timerExt ? gpuMs.toFixed(2) + ' ms' : 'n/a';
+
+  if (performance.memory) {
+    jsHeapEl.textContent = (performance.memory.usedJSHeapSize / 1024 / 1024).toFixed(1) + ' MB';
+  } else {
+    jsHeapEl.textContent = 'n/a';
   }
+
+  longTasksEl.textContent = _longTaskCount;
+
+  const info = renderer.info;
+  drawCallsEl.textContent = info.render.calls;
+  progCountEl.textContent = info.programs?.length ?? '--';
+  texCountEl.textContent  = info.memory.textures;
+  geomCountEl.textContent = info.memory.geometries;
+
+  fpsFrames = 0;
+  _cpuSumMs = 0;
+  fpsLastTime = now;
 }
 
 // ===== RENDER LOOP =====
@@ -2271,6 +2359,9 @@ function animate() {
   requestAnimationFrame(animate);
   const dt = clock.getDelta();
 
+  const cpuStart = performance.now();
+  const gpuQ     = gpuBeginFrame();
+
   if (mixer) mixer.update(dt);
   controls.update();
 
@@ -2278,6 +2369,10 @@ function animate() {
   faceCtrl?.update(dt);
 
   renderer.render(scene, camera);
+
+  gpuEndFrame(gpuQ);
+  _lastCpuMs = performance.now() - cpuStart;
+
   updateFPS();
 }
 animate();
