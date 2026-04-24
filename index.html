@@ -735,11 +735,13 @@ const PAGE_START = performance.now();
 const canvas = document.getElementById('canvas');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
-// Cap at 1.25 — on high-DPI / large monitors the visual difference against
-// native is imperceptible on a bust-shot character over a flat background,
-// but the fragment-shader work drops by roughly (DPR/1.25)² which recovers
-// most of the FPS lost to fillrate on 4K / wide screens.
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.25));
+// Render at 0.75× the canvas CSS size. On a DPR=1 32" monitor that means
+// 75% the fragment work (equivalent effect to running at 1440p inside a
+// 2K window). Visually the bust over a flat background is nearly
+// indistinguishable; GPU savings ≈ (1 - 0.75²) = 44%.
+// DPR cap still applies so Retina displays don't balloon this back up.
+const RENDER_SCALE = 0.75;
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.25) * RENDER_SCALE);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.2;
