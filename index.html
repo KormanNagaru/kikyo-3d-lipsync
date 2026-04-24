@@ -735,7 +735,11 @@ const PAGE_START = performance.now();
 const canvas = document.getElementById('canvas');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+// Cap at 1.25 — on high-DPI / large monitors the visual difference against
+// native is imperceptible on a bust-shot character over a flat background,
+// but the fragment-shader work drops by roughly (DPR/1.25)² which recovers
+// most of the FPS lost to fillrate on 4K / wide screens.
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.25));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.2;
