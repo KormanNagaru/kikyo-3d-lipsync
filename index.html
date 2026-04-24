@@ -694,11 +694,18 @@ function isHairMesh(child) {
   return /hair|wig|strand|card|fur/i.test(child.name || '') || /hair|wig|strand|card|fur/i.test(matName);
 }
 
+// Diagnostic toggle: append ?noshader=1 to the URL to skip all custom
+// patches and render with vanilla MeshStandardMaterial. Useful to isolate
+// whether perf issues are caused by our shader work or by something else.
+const CUSTOM_SHADER_ENABLED = !new URLSearchParams(location.search).has('noshader');
+if (!CUSTOM_SHADER_ENABLED) console.warn('[shader] custom skin/hair patches DISABLED via ?noshader=1');
+
 // Apply our character shader patch to an existing MeshStandardMaterial without
 // replacing it — preserves embedded textures/settings from the GLB. Idempotent:
 // a material already patched (flagged via userData) is skipped so we never
 // double-register onBeforeCompile.
 function applyCharShaderToMaterial(mat) {
+  if (!CUSTOM_SHADER_ENABLED) return;
   if (!mat || !mat.isMeshStandardMaterial) return;
   if (mat.userData?._charShaderApplied) return;
   mat.userData = mat.userData || {};
