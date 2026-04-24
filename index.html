@@ -491,12 +491,13 @@ void main() {`
 
   // Direct specular occlusion (Filament "Moving to PBR" approximation).
   // Expands the aomap chunk so AO also occludes direct specular, not just indirect.
+  // r162 uses local vars `geometryNormal` / `geometryViewDir` (no struct wrapping).
   shader.fragmentShader = shader.fragmentShader.replace(
     '#include <aomap_fragment>',
     THREE.ShaderChunk.aomap_fragment.replace(
       'reflectedLight.indirectDiffuse *= ambientOcclusion;',
       `reflectedLight.indirectDiffuse *= ambientOcclusion;
-  float NdotV_ao = saturate(dot(geometry.normal, geometry.viewDir));
+  float NdotV_ao = saturate(dot(geometryNormal, geometryViewDir));
   float specOcc  = saturate(
     pow(NdotV_ao + ambientOcclusion,
         exp2(-16.0 * material.roughness * material.roughness - 1.0))
@@ -509,7 +510,7 @@ void main() {`
   shader.fragmentShader = shader.fragmentShader.replace(
     'vec3 outgoingLight = totalDiffuse + totalSpecular + totalEmissiveRadiance;',
     `vec3 outgoingLight = totalDiffuse + totalSpecular + totalEmissiveRadiance;
-float NdotV_rim = saturate(dot(geometry.normal, geometry.viewDir));
+float NdotV_rim = saturate(dot(geometryNormal, geometryViewDir));
 float rim = pow(1.0 - NdotV_rim, uRimPower) * uRimStrength;
 outgoingLight += uRimColor * rim * (1.0 - metalnessFactor);`
   );
