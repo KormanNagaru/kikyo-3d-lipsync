@@ -1239,8 +1239,8 @@ async function loadModelFromBlob(blob, filename) {
       // Frame the upper body (bust shot) for a 1.7m character
       // 85mm portrait lens → vertical FOV ≈ 16° on 24mm sensor equivalent
       const faceY = 1.55;                     // eye/face height
-      controls.target.set(0, faceY - 0.25, 0); // target lower — mid-chest
-      camera.position.set(0, faceY - 0.2, 8.1); // pulled back to compensate for narrower FOV
+      controls.target.set(0, faceY - 0.15, 0);  // aim slightly above the chest so the face is centered
+      camera.position.set(0, faceY - 0.35, 8.1); // camera lowered — slight upward bust-shot angle
       camera.near = 0.1;
       camera.far = 200;
       camera.fov = 16;                        // 85mm-equivalent portrait
