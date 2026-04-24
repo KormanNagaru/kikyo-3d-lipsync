@@ -576,6 +576,7 @@ function patchCharacterShader(shader, isHair, opts = {}) {
     shader.uniforms.uSSSColor        = { value: new THREE.Color(...(opts.sssColor || [0.95, 0.35, 0.25])) };
     shader.uniforms.uSSSStrength     = { value: opts.sssStrength    ?? 0.5  };
     shader.uniforms.uSSSPower        = { value: opts.sssPower       ?? 4.0  };
+    shader.uniforms.uHasThickness    = { value: opts.hasThickness ? 1.0 : 0.0 };
     shader.uniforms.uDetailTile      = { value: opts.detailTile     ?? 15.0 };
     shader.uniforms.uDetailStr       = { value: opts.detailStrength ?? 0.5  };
     if (opts.detailNormalMap) {
@@ -601,6 +602,7 @@ uniform float uWrap;
 uniform vec3  uSSSColor;
 uniform float uSSSStrength;
 uniform float uSSSPower;
+uniform float uHasThickness;
 uniform float uDetailTile;
 uniform float uDetailStr;
 #ifdef USE_DETAIL_NORMAL
@@ -655,19 +657,32 @@ void main() {`
 #endif`
     );
 
-    // Skin: diffuse wrap + back-scatter fake SSS inside direct-light loop
+    // Skin: diffuse wrap + back-scatter fake SSS inside direct-light loop.
+    //
+    // Thickness convention (industry standard, matches Unity HDRP, glTF
+    // KHR_materials_volume, MetaHuman, ARKit):
+    //   white  (1.0) = THICK → no light bleed → no SSS
+    //   black  (0.0) = THIN  → light bleeds through → strong SSS (ears, nose wings)
+    //
+    // We store thickness in aoMap.a. Artists bake this normally; we invert
+    // it to a "how much SSS to ADD" mask here.
+    //
+    // uHasThickness gates the whole term. Default 0.0 so a model without an
+    // authored thickness map (where aoMap.a is effectively noise or 1.0)
+    // doesn't render with uniform SSS — which would look worse than nothing.
     shader.fragmentShader = shader.fragmentShader.replace(
       'float dotNL = saturate( dot( geometryNormal, directLight.direction ) );',
       `float _ndl = dot( geometryNormal, directLight.direction );
 float dotNL = saturate( (_ndl + uWrap) / (1.0 + uWrap) );
 #ifdef USE_AOMAP
-  float _thick = texture2D(aoMap, vAoMapUv).a;
+  float _thickRaw = texture2D(aoMap, vAoMapUv).a;
+  float _sssMask  = (1.0 - _thickRaw) * uHasThickness;
 #else
-  float _thick = 0.0;
+  float _sssMask  = 0.0;
 #endif
-if (_thick > 0.01) {
+if (_sssMask > 0.01) {
   float _backNdV = saturate(dot(geometryViewDir, -directLight.direction) + uWrap);
-  gSssExtra += directLight.color * pow(_backNdV, uSSSPower) * uSSSColor * uSSSStrength * _thick;
+  gSssExtra += directLight.color * pow(_backNdV, uSSSPower) * uSSSColor * uSSSStrength * _sssMask;
 }`
     );
   }
