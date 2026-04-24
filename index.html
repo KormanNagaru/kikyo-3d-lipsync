@@ -679,12 +679,47 @@ function createCharacterMaterial(textures, isHair, opts = {}) {
   return mat;
 }
 
+// Per-MATERIAL hair detection. The production pipeline has hair cards embedded
+// in the body mesh (same geometry, different material index — unified mesh keeps
+// blendshapes consistent), so checking mesh name is not enough. Every material
+// is inspected individually.
+function isHairMaterial(mat) {
+  return /hair|wig|strand|card|fur/i.test(mat?.name || '');
+}
+// Kept for the external-texture Kikyo path (single hair mesh with hair-like name).
 function isHairMesh(child) {
   const matName = Array.isArray(child.material)
     ? child.material[0]?.name || ''
     : child.material?.name || '';
-  const name = (child.name + ' ' + matName).toLowerCase();
-  return /hair|wig|strand|card|fur/.test(name);
+  return /hair|wig|strand|card|fur/i.test(child.name || '') || /hair|wig|strand|card|fur/i.test(matName);
+}
+
+// Apply our character shader patch to an existing MeshStandardMaterial without
+// replacing it — preserves embedded textures/settings from the GLB. Idempotent:
+// a material already patched (flagged via userData) is skipped so we never
+// double-register onBeforeCompile.
+function applyCharShaderToMaterial(mat) {
+  if (!mat || !mat.isMeshStandardMaterial) return;
+  if (mat.userData?._charShaderApplied) return;
+  mat.userData = mat.userData || {};
+  mat.userData._charShaderApplied = true;
+
+  const isHair = isHairMaterial(mat);
+  const priorOBC = mat.onBeforeCompile;
+  mat.onBeforeCompile = (shader) => {
+    priorOBC?.(shader);
+    patchCharacterShader(shader, isHair);
+  };
+  mat.customProgramCacheKey = () => `charMat_${isHair ? 'hair' : 'skin'}`;
+
+  if (isHair) {
+    mat.side = THREE.DoubleSide;
+    // Preserve explicit transparency; otherwise add an alphaTest so hair cards
+    // don't rely on depth sorting, and enable alpha-to-coverage for soft edges.
+    if (mat.transparent !== true && !mat.alphaTest) mat.alphaTest = 0.5;
+    mat.alphaToCoverage = true;
+  }
+  mat.needsUpdate = true;
 }
 
 const PAGE_START = performance.now();
@@ -1044,46 +1079,48 @@ async function loadModelFromBlob(blob, filename) {
           totalTris += (child.geometry.index ? child.geometry.index.count / 3 : (child.geometry.attributes.position?.count || 0) / 3);
 
           if (isKikyo) {
+            // Kikyo ships external Kikyo-specific textures — build a fresh
+            // MeshStandardMaterial (createCharacterMaterial already wires the
+            // shader patch internally and flags userData so the universal
+            // pass below skips it).
             const hair = isHairMesh(child);
             child.material = createCharacterMaterial(textures, hair);
+            child.material.userData = child.material.userData || {};
+            child.material.userData._charShaderApplied = true;
             if (textures.ao && child.geometry.attributes.uv) {
               child.geometry.attributes.uv2 = child.geometry.attributes.uv;
             }
           } else {
-            // BS_Rig_Test has single grey material — apply nice skin tone
+            // Fallback tinting for BS_Rig_Test (and any GLB without textures)
             if (child.material) {
-              const mat = child.material;
-              mat.side = THREE.DoubleSide;
-
-              if (!mat.map) {
-                // No texture: colorize by material/mesh name, default skin tone
-                const lname = ((mat.name || '') + ' ' + child.name).toLowerCase();
-
-                if (lname.match(/hair|wig/)) {
-                  mat.color = new THREE.Color(0x3a2418);
-                  mat.roughness = 0.6;
-                } else if (lname.match(/eye|iris|pupil/)) {
-                  mat.color = new THREE.Color(0x2a4d6e);
-                  mat.roughness = 0.2;
-                } else if (lname.match(/teeth/)) {
-                  mat.color = new THREE.Color(0xf5e6d3);
-                } else if (lname.match(/lip|mouth/)) {
-                  mat.color = new THREE.Color(0xc97a6b);
-                } else if (lname.match(/cloth|shirt|dress/)) {
-                  mat.color = new THREE.Color(0x4a5568);
-                } else {
-                  // Default: warm skin tone with slight subsurface feel
-                  mat.color = new THREE.Color(0xf5d0b3);
-                  mat.roughness = 0.6;
-                  mat.metalness = 0.02;
-                  mat.emissive = new THREE.Color(0x2a1408);
-                  mat.emissiveIntensity = 0.08;
+              const mats = Array.isArray(child.material) ? child.material : [child.material];
+              mats.forEach((mat) => {
+                mat.side = THREE.DoubleSide;
+                if (!mat.map) {
+                  const lname = ((mat.name || '') + ' ' + child.name).toLowerCase();
+                  if (lname.match(/hair|wig/))          { mat.color = new THREE.Color(0x3a2418); mat.roughness = 0.6; }
+                  else if (lname.match(/eye|iris|pupil/)){ mat.color = new THREE.Color(0x2a4d6e); mat.roughness = 0.2; }
+                  else if (lname.match(/teeth/))         { mat.color = new THREE.Color(0xf5e6d3); }
+                  else if (lname.match(/lip|mouth/))     { mat.color = new THREE.Color(0xc97a6b); }
+                  else if (lname.match(/cloth|shirt|dress/)) { mat.color = new THREE.Color(0x4a5568); }
+                  else {
+                    mat.color = new THREE.Color(0xf5d0b3);
+                    mat.roughness = 0.6; mat.metalness = 0.02;
+                    mat.emissive = new THREE.Color(0x2a1408); mat.emissiveIntensity = 0.08;
+                  }
+                  mat.needsUpdate = true;
                 }
-                mat.needsUpdate = true;
-                console.log(`Colored "${mat.name || child.name}" -> #${mat.color.getHexString()}`);
-              }
+              });
             }
           }
+
+          // Universal pass: apply our skin/hair shader variant to EVERY material
+          // on every mesh, per-material-name-detection. This is what makes the
+          // production pipeline (unified body-with-hair-cards mesh, 2 materials)
+          // light up with the right shader per submesh — Kikyo materials are
+          // already flagged so this is a no-op for them.
+          const allMats = Array.isArray(child.material) ? child.material : [child.material];
+          allMats.forEach(applyCharShaderToMaterial);
         }
       });
       document.getElementById('triCount').textContent = Math.round(totalTris).toLocaleString();
