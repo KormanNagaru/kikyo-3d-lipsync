@@ -1346,10 +1346,26 @@ async function loadModelFromBlob(blob, filename) {
       // Instantiate GazeController — avatar looks at the camera by default,
       // with idle saccades so the eyes feel alive while not speaking. No-op
       // when eye bones are missing (e.g. BS_Rig_Test which has none yet).
-      gazeCtrl = (gazeBones.leftEye || gazeBones.rightEye || gazeBones.head)
+      // Kill-switch: ?nogaze=1 disables the whole gaze system so we can
+      // isolate whether a rendering artifact comes from the controller or
+      // from the asset itself.
+      const gazeDisabled = new URLSearchParams(location.search).has('nogaze');
+      if (gazeDisabled) console.warn('[gaze] GazeController DISABLED via ?nogaze=1');
+      gazeCtrl = (!gazeDisabled && (gazeBones.leftEye || gazeBones.rightEye || gazeBones.head))
         ? new GazeController(gazeBones)
         : null;
       gazeCtrl?.lookAtObject(camera);
+
+      // Debug log: print each bone's detected "local forward" axis. If it
+      // points sharply away from +Z (e.g. closer to +Y or -Z), the avatar
+      // probably faces a different world axis than we assumed, and the fix
+      // is a one-line orientation flip rather than a shader/texture hunt.
+      if (gazeCtrl) {
+        for (const info of gazeCtrl._bones) {
+          console.log(`[gaze] ${info.bone.name}: localForward =`,
+            info.localForward.toArray().map(v => v.toFixed(3)).join(', '));
+        }
+      }
 
       // Compute raw bounds
       model.updateMatrixWorld(true);
