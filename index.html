@@ -1663,7 +1663,9 @@ class GazeController {
     // Scratch
     this._tmpV1 = new THREE.Vector3();
     this._tmpV2 = new THREE.Vector3();
+    this._tmpV3 = new THREE.Vector3();
     this._tmpQ  = new THREE.Quaternion();
+    this._tmpQ2 = new THREE.Quaternion();
     this._tmpM  = new THREE.Matrix4();
     this._zeroQ = new THREE.Quaternion();
   }
@@ -1704,30 +1706,41 @@ class GazeController {
     if (!bone.parent) return;
     bone.parent.updateMatrixWorld();
 
-    // Target in bone's PARENT local space, direction from bone to target.
+    // Target direction in bone's PARENT-local frame.
     this._tmpV2.copy(targetWorld);
     bone.parent.worldToLocal(this._tmpV2);
     this._tmpV2.sub(bone.position).normalize();
 
-    // Rotation that maps bone-local "forward" axis to that direction.
-    // This IS the desired local quaternion for the bone (independent of rest;
-    // rest pose is implicit in localForward).
-    const desired = this._tmpQ.setFromUnitVectors(info.localForward, this._tmpV2);
+    // Rest forward direction expressed in PARENT-local frame. At bind pose the
+    // bone's forward (`localForward` in bone-local) ends up here after restQuat.
+    this._tmpV3.copy(info.localForward).applyQuaternion(info.restQuat).normalize();
 
-    // Clamp total angle. Eye can't rotate 90° without looking insane —
-    // a simple angle clamp keeps the motion plausible (could split H/V but
-    // single-angle is easier and usually fine for avatars facing ~camera).
+    // Delta rotation: rotate the rest-forward vector to the desired target
+    // direction. Both vectors are in the SAME (parent-local) frame now, so
+    // fromUnitVectors returns a meaningful rotation.
+    const delta = this._tmpQ.setFromUnitVectors(this._tmpV3, this._tmpV2);
+
+    // Clamp the delta angle (NOT the absolute bone rotation — that would
+    // collapse the bone's rest orientation).
     const maxAngle = Math.max(info.maxH, info.maxV);
-    const angle    = 2 * Math.acos(Math.min(1, Math.abs(desired.w)));
+    const angle    = 2 * Math.acos(Math.min(1, Math.abs(delta.w)));
     if (angle > maxAngle) {
-      desired.slerp(this._zeroQ, 1 - maxAngle / angle);
+      delta.slerp(this._zeroQ, 1 - maxAngle / angle);
     }
+    // Head-follow factor dampens just the delta, preserving head's rest pose.
+    if (info.factor < 1) delta.slerp(this._zeroQ, 1 - info.factor);
 
-    // Head-follow factor (< 1 dampens the head rotation vs eyes)
-    if (info.factor < 1) desired.slerp(this._zeroQ, 1 - info.factor);
+    // Compose: bone.quaternion = delta * restQuat
+    // Proof that bone's forward ends up at target:
+    //   (delta * restQuat) * localForward
+    // = delta * (restQuat * localForward)
+    // = delta * restForwardParent
+    // = targetDirParent  ✓
+    // Crucially this PRESERVES the rest roll/twist (e.g. the eye's up-axis
+    // stays aligned with head's up), unlike directly assigning the delta.
+    const desired = this._tmpQ2.copy(delta).multiply(info.restQuat);
 
-    // Smooth lerp from current toward desired, using framerate-independent
-    // decay: fraction = 1 - e^(-rate·dt). At 60 FPS with rate=18, k≈0.26/frame.
+    // Framerate-independent exponential smoothing toward desired.
     const k = 1 - Math.exp(-info.lerpRate * dt);
     bone.quaternion.slerp(desired, k);
   }
