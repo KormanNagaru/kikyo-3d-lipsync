@@ -388,6 +388,9 @@ body {
   <div><span class="label">GPU: </span><span id="gpuMs" class="value">--</span></div>
   <div><span class="label">JS heap: </span><span id="jsHeap" class="value">--</span></div>
   <div><span class="label">Long tasks: </span><span id="longTasks" class="value">0</span></div>
+  <div><span class="label">Net total: </span><span id="netTotal" class="value">0 B</span></div>
+  <div><span class="label">Net rate: </span><span id="netRate" class="value">0 B/s</span></div>
+  <div><span class="label">Requests: </span><span id="netReq" class="value">0</span></div>
   <hr style="border:0; border-top:1px solid rgba(255,255,255,0.08); margin:6px 0;">
   <div><span class="label">Load time: </span><span id="loadTime" class="value">--</span></div>
   <div><span class="label">Model: </span><span id="modelSize" class="value">--</span></div>
@@ -2301,6 +2304,77 @@ if (typeof PerformanceObserver !== 'undefined') {
   } catch { /* not supported in this browser */ }
 }
 
+// Network observer — totals all resource transfers via Resource Timing API,
+// plus keeps a rolling 2-second byte-window for live rate estimation. Covers
+// every HTTP fetch the browser makes (our /api/model, shader transcoder from
+// jsdelivr, the GLB stream, everything — whether invoked by fetch() or
+// implicitly by GLTFLoader/KTX2Loader/script tags).
+let _netTotalBytes = 0;
+let _netRequestCount = 0;
+const _netWindow = []; // { t, bytes } ring for rate calc
+const NET_WINDOW_MS = 2000;
+
+function _accountNetwork(bytes) {
+  if (!(bytes > 0)) return;
+  _netTotalBytes += bytes;
+  _netRequestCount++;
+  _netWindow.push({ t: performance.now(), bytes });
+}
+function _currentNetRate() {
+  const cutoff = performance.now() - NET_WINDOW_MS;
+  while (_netWindow.length && _netWindow[0].t < cutoff) _netWindow.shift();
+  if (!_netWindow.length) return 0;
+  const sum = _netWindow.reduce((s, e) => s + e.bytes, 0);
+  const span = Math.max(performance.now() - _netWindow[0].t, 1) / 1000;
+  return sum / span; // bytes/sec over the last ~2s
+}
+
+// Primary source: Resource Timing entries. Captures anything the HTML/JS
+// requests including streaming downloads — `transferSize` is bytes over the
+// wire (0 for cached), we fall back to encodedBodySize/decodedBodySize when
+// CORS prevents reading transferSize.
+if (typeof PerformanceObserver !== 'undefined') {
+  try {
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) {
+        const bytes = e.transferSize || e.encodedBodySize || e.decodedBodySize || 0;
+        _accountNetwork(bytes);
+      }
+    }).observe({ entryTypes: ['resource'] });
+    // Also account for resources already loaded before the observer attached
+    for (const e of performance.getEntriesByType('resource')) {
+      const bytes = e.transferSize || e.encodedBodySize || e.decodedBodySize || 0;
+      _accountNetwork(bytes);
+    }
+  } catch { /* not supported */ }
+}
+
+// Secondary source: wrap fetch() to account for REQUEST bodies (uploads).
+// Resource Timing only tracks responses; our POST /api/model upload of a
+// 30 MB GLB won't show up otherwise. Counts Content-Length header / Blob
+// size when available.
+const _origFetch = window.fetch;
+window.fetch = function(input, init) {
+  try {
+    const body = init?.body;
+    if (body) {
+      let bytes = 0;
+      if (body.size !== undefined) bytes = body.size;              // Blob / File
+      else if (body.byteLength !== undefined) bytes = body.byteLength; // ArrayBuffer / TypedArray
+      else if (typeof body === 'string') bytes = body.length;      // rough
+      if (bytes > 0) _accountNetwork(bytes);
+    }
+  } catch { /* ignore */ }
+  return _origFetch.call(this, input, init);
+};
+
+function _fmtBytes(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + ' GB';
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + ' MB';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + ' KB';
+  return n + ' B';
+}
+
 // ===== FPS + PERF COUNTER =====
 let fpsFrames = 0;
 let fpsLastTime = performance.now();
@@ -2316,6 +2390,9 @@ const drawCallsEl  = document.getElementById('drawCalls');
 const progCountEl  = document.getElementById('progCount');
 const texCountEl   = document.getElementById('texCount');
 const geomCountEl  = document.getElementById('geomCount');
+const netTotalEl   = document.getElementById('netTotal');
+const netRateEl    = document.getElementById('netRate');
+const netReqEl     = document.getElementById('netReq');
 
 function updateFPS() {
   fpsFrames++;
@@ -2346,6 +2423,10 @@ function updateFPS() {
   progCountEl.textContent = info.programs?.length ?? '--';
   texCountEl.textContent  = info.memory.textures;
   geomCountEl.textContent = info.memory.geometries;
+
+  netTotalEl.textContent = _fmtBytes(_netTotalBytes);
+  netRateEl.textContent  = _fmtBytes(Math.round(_currentNetRate())) + '/s';
+  netReqEl.textContent   = _netRequestCount;
 
   fpsFrames = 0;
   _cpuSumMs = 0;
