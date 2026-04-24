@@ -594,6 +594,7 @@ if (_thick > 0.01) {
     shader.fragmentShader = shader.fragmentShader.replace(
       'vec3 irradiance = dotNL * directLight.color;',
       `vec3 irradiance = dotNL * directLight.color;
+#ifdef USE_MAP
 {
   // Derive a per-pixel tangent aligned with UV-V (root→tip on every hair card)
   // from screen-space derivatives. Fails gracefully on degenerate UV (det≈0).
@@ -615,7 +616,8 @@ if (_thick > 0.01) {
     vec3  _s  = uHairTint * material.diffuseColor * pow(s2, uHairExp2) * uHairStr2;
     gHairSpec += directLight.color * dotNL * (_p + _s);
   }
-}`
+}
+#endif`
     );
   }
 
