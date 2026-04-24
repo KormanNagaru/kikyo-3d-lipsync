@@ -1,6 +1,6 @@
 // Pages Function: /api/model
 // GET     → streams the currently active GLB from R2
-// POST    → replaces the active GLB
+// POST    → replaces the active GLB (streamed to R2, not buffered in RAM)
 // DELETE  → clears the active GLB, reverts to bundled default
 //
 // Binding (see wrangler.toml): env.MODELS — R2 bucket
@@ -8,6 +8,7 @@
 
 const OBJECT_KEY = 'current.glb';
 const MAX_BYTES = 100 * 1024 * 1024; // 100 MB — plenty for any realistic GLB
+const GLB_MAGIC = [0x67, 0x6C, 0x54, 0x46]; // ASCII "glTF" — first 4 bytes of any GLB file
 
 const CORS = {
   'Access-Control-Allow-Origin':  '*',
@@ -40,23 +41,63 @@ export async function onRequestGet({ env }) {
 }
 
 export async function onRequestPost({ request, env }) {
+  if (!request.body) return json(400, { error: 'empty body' });
+
+  // Cheap up-front rejection if the client advertises a too-large payload
   const lenHeader = request.headers.get('content-length');
   if (lenHeader && parseInt(lenHeader, 10) > MAX_BYTES) {
     return json(413, { error: 'file too large', limit: MAX_BYTES });
   }
 
-  const body = await request.arrayBuffer();
-  if (body.byteLength > MAX_BYTES) {
-    return json(413, { error: 'file too large', limit: MAX_BYTES });
-  }
-  if (body.byteLength === 0) {
-    return json(400, { error: 'empty body' });
+  // Inline transform that (1) counts bytes for a trustworthy size limit and
+  // (2) verifies the GLB magic on the first 4 bytes. Streams chunks straight
+  // through to R2 without ever buffering the full file in Worker RAM.
+  let totalBytes = 0;
+  let headBuf = new Uint8Array(0);
+
+  const validator = new TransformStream({
+    transform(chunk, controller) {
+      totalBytes += chunk.byteLength;
+      if (totalBytes > MAX_BYTES) {
+        controller.error(new Error('too-large'));
+        return;
+      }
+      if (headBuf.byteLength < 4) {
+        const take = Math.min(4 - headBuf.byteLength, chunk.byteLength);
+        const merged = new Uint8Array(headBuf.byteLength + take);
+        merged.set(headBuf, 0);
+        merged.set(chunk.subarray(0, take), headBuf.byteLength);
+        headBuf = merged;
+        if (headBuf.byteLength >= 4) {
+          for (let i = 0; i < 4; i++) {
+            if (headBuf[i] !== GLB_MAGIC[i]) {
+              controller.error(new Error('bad-magic'));
+              return;
+            }
+          }
+        }
+      }
+      controller.enqueue(chunk);
+    },
+    flush(controller) {
+      if (totalBytes === 0)          controller.error(new Error('empty'));
+      else if (headBuf.byteLength < 4) controller.error(new Error('bad-magic'));
+    },
+  });
+
+  try {
+    await env.MODELS.put(OBJECT_KEY, request.body.pipeThrough(validator), {
+      httpMetadata: { contentType: 'model/gltf-binary' },
+    });
+  } catch (e) {
+    const msg = String(e?.message || e);
+    if (msg.includes('too-large')) return json(413, { error: 'file too large', limit: MAX_BYTES });
+    if (msg.includes('bad-magic')) return json(400, { error: 'not a GLB file — first 4 bytes must be "glTF"' });
+    if (msg.includes('empty'))     return json(400, { error: 'empty body' });
+    return json(500, { error: 'upload failed: ' + msg });
   }
 
-  await env.MODELS.put(OBJECT_KEY, body, {
-    httpMetadata: { contentType: 'model/gltf-binary' },
-  });
-  return json(200, { ok: true, size: body.byteLength });
+  return json(200, { ok: true, size: totalBytes });
 }
 
 export async function onRequestDelete({ env }) {

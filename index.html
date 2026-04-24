@@ -1082,13 +1082,23 @@ async function handleFile(file) {
     return;
   }
 
-  // Admin-only: push to R2 BEFORE loading locally, so we don't change the UI
-  // if the password is wrong / cancelled.
+  // Show loading UI during upload so the user sees progress on big files.
+  loadingEl.classList.remove('hidden');
+  dropZone.style.display = 'none';
+  loadingSpinner.style.display = 'block';
+  loadingText.style.display = 'block';
+  loadingText.textContent = `Uploading ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)…`;
+
+  // Push to R2 first so a network/validation failure leaves the current
+  // scene untouched — we only swap the model after the server accepts it.
   const uploaded = await remoteModelPut(file);
   if (!uploaded.ok) {
+    loadingText.textContent = `Upload failed: ${uploaded.error}`;
     alert('Upload failed: ' + uploaded.error + '\nThe model was not replaced on the server.');
     return;
   }
+
+  loadingText.textContent = `Loading ${file.name}…`;
 
   // Reset state for a new model
   if (model) {
