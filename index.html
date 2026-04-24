@@ -1125,13 +1125,24 @@ async function loadModelFromBlob(blob, filename) {
       });
       document.getElementById('triCount').textContent = Math.round(totalTris).toLocaleString();
 
-      // Index-based mapping for BS_Rig_Test (blend shapes exported without names)
+      // Index-based mapping for the BS_Rig export pipeline, which writes
+      // blendshapes without semantic names (0..18). Detect by CONTENT
+      // (numeric names + matching count), not by filename — the R2-shared
+      // model arrives here as "shared.glb" and filename-matching would fail.
       const BS_RIG_ORDER = [
         'PP', 'E', 'O', 'I', 'CH', 'RR', 'KK', 'TH', 'NN', 'AA',
         'SS', 'U', 'DD', 'FF', 'Charisma', 'Smile', 'Surpriced_O',
         'Blinking', 'Surpriced_Normal'
       ];
-      const isBSRig = file.toLowerCase().includes('bs_rig');
+      let isBSRig = false;
+      model.traverse((child) => {
+        if (isBSRig || !child.isMesh || !child.morphTargetDictionary) return;
+        const names = Object.keys(child.morphTargetDictionary);
+        if (names.length === BS_RIG_ORDER.length && names.every(n => /^\d+$/.test(n))) {
+          isBSRig = true;
+        }
+      });
+      if (isBSRig) console.log('Detected BS_Rig blendshape layout — applying semantic names.');
 
       // Map morph targets
       const allShapes = [];
