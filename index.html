@@ -1301,12 +1301,21 @@ async function loadModelFromBlob(blob, filename) {
 
       buildTesterPanel(allShapes);
 
-      // Find jaw bone
+      // Find jaw bone (still detected for FaceController, even though
+      // jawMaxDeg=0 by default — kept for potential future idle jaw movement)
       let jawBone = null;
       model.traverse(child => {
-        if (!jawBone && child.isBone && /jaw/i.test(child.name)) jawBone = child;
+        if (!jawBone && child.isBone && /^jaw[._-]?m?$/i.test(child.name)) jawBone = child;
       });
       if (jawBone) console.log('Jaw bone:', jawBone.name);
+
+      // Find gaze bones (Eye_L / Eye_R / Head_M convention, fuzzy fallback)
+      const gazeBones = findGazeBones(model);
+      console.log('Gaze bones:', {
+        leftEye:  gazeBones.leftEye?.name  || '(none)',
+        rightEye: gazeBones.rightEye?.name || '(none)',
+        head:     gazeBones.head?.name     || '(none)',
+      });
 
       // Resolve blink shape name
       const blinkShape = morphMap['Blinking'] ? 'Blinking' : (morphMap['BLINK'] ? 'BLINK' : 'Blinking');
@@ -1318,6 +1327,14 @@ async function loadModelFromBlob(blob, filename) {
         { blinkShape, jawMaxDeg: 0 }  // jaw disabled — enable + set jawAxisV when axis is known
       );
       faceCtrl.manual = manualOverrides;
+
+      // Instantiate GazeController — avatar looks at the camera by default,
+      // with idle saccades so the eyes feel alive while not speaking. No-op
+      // when eye bones are missing (e.g. BS_Rig_Test which has none yet).
+      gazeCtrl = (gazeBones.leftEye || gazeBones.rightEye || gazeBones.head)
+        ? new GazeController(gazeBones)
+        : null;
+      gazeCtrl?.lookAtObject(camera);
 
       // Compute raw bounds
       model.updateMatrixWorld(true);
@@ -1469,6 +1486,7 @@ async function handleFile(file) {
   morphMeshes = [];
   morphMap = {};
   faceCtrl = null;
+  gazeCtrl = null;
   Object.keys(manualOverrides).forEach(k => delete manualOverrides[k]);
 
   await loadModelFromBlob(file, file.name);
@@ -1541,6 +1559,148 @@ const FC_JAW_WEIGHTS = {
   'DD': 0.15, 'KK': 0.10, 'CH': 0.30,
   'SS': 0.15, 'NN': 0.10,
 };
+
+// ===== GAZE CONTROLLER =====
+// Independent layer over FaceController. Rotates eye bones (and optionally
+// the head bone as secondary follow) toward a world target — camera by
+// default. Designed to never clobber the rig if bones are missing; every
+// feature is defensive with early-out.
+//
+// Bone name detection is exact-name-first (e.g. the artist's Eye_L / Eye_R /
+// Head_M convention), falling back to fuzzy regex for other pipelines.
+function findGazeBones(root) {
+  const found = { leftEye: null, rightEye: null, head: null };
+  const matchers = {
+    leftEye:  [n => /^eye[._-]?l$/i.test(n), n => /^l[._-]?eye$/i.test(n), n => /left[._-]?eye/i.test(n)],
+    rightEye: [n => /^eye[._-]?r$/i.test(n), n => /^r[._-]?eye$/i.test(n), n => /right[._-]?eye/i.test(n)],
+    head:     [n => /^head[._-]?m$/i.test(n), n => /^head$/i.test(n), n => /^head[._-]?end$/i.test(n)],
+  };
+  root.traverse((obj) => {
+    if (!obj.isBone && !obj.isObject3D) return;
+    const name = (obj.name || '').trim();
+    for (const [k, preds] of Object.entries(matchers)) {
+      if (!found[k] && preds.some(p => p(name))) found[k] = obj;
+    }
+  });
+  return found;
+}
+
+class GazeController {
+  constructor({ leftEye, rightEye, head }, opts = {}) {
+    this._bones = [];
+    // Ensure parent world matrices are up-to-date so world-space math works
+    // correctly the first frame.
+    const setupBone = (bone, cfg) => {
+      if (!bone) return;
+      bone.updateMatrixWorld(true);
+      // Bone's "forward" (which direction its native +Z, -Z, +Y, etc. maps to
+      // in world) is derived from the avatar's overall facing. We assume the
+      // avatar looks along +Z world at rest — this is the Three.js glTF
+      // convention after our loader normalizes. The "local forward" is the
+      // bone-local vector that, when transformed by the bone's rest world
+      // quaternion, yields the avatar-forward axis.
+      const worldQ = bone.getWorldQuaternion(new THREE.Quaternion());
+      const localForward = new THREE.Vector3(0, 0, 1)
+        .applyQuaternion(worldQ.clone().invert())
+        .normalize();
+      this._bones.push({
+        bone,
+        restQuat:     bone.quaternion.clone(),
+        localForward,
+        maxH: cfg.maxH,
+        maxV: cfg.maxV,
+        lerpRate: cfg.lerpRate,
+        factor: cfg.factor ?? 1,
+      });
+    };
+
+    const deg = THREE.MathUtils.degToRad;
+    setupBone(leftEye,  { maxH: deg(opts.maxEyeH  ?? 25), maxV: deg(opts.maxEyeV  ?? 15), lerpRate: opts.eyeLerp  ?? 18 });
+    setupBone(rightEye, { maxH: deg(opts.maxEyeH  ?? 25), maxV: deg(opts.maxEyeV  ?? 15), lerpRate: opts.eyeLerp  ?? 18 });
+    setupBone(head,     { maxH: deg(opts.maxHeadH ?? 40), maxV: deg(opts.maxHeadV ?? 25), lerpRate: opts.headLerp ??  3, factor: opts.headFactor ?? 0.35 });
+
+    this._targetWorld = new THREE.Vector3(0, 1.5, 10);
+    this._followObj   = null;
+
+    // Saccades — small periodic target perturbations so the eyes don't feel
+    // dead when idle. Disabled during speech (tied to state machine later).
+    this.saccadesEnabled = true;
+    this._saccT     = 0;
+    this._saccNext  = 1 + Math.random() * 2;
+    this._saccOff   = new THREE.Vector3();
+
+    // Scratch
+    this._tmpV1 = new THREE.Vector3();
+    this._tmpV2 = new THREE.Vector3();
+    this._tmpQ  = new THREE.Quaternion();
+    this._tmpM  = new THREE.Matrix4();
+    this._zeroQ = new THREE.Quaternion();
+  }
+
+  lookAt(worldX, worldY, worldZ) {
+    this._targetWorld.set(worldX, worldY, worldZ);
+    this._followObj = null;
+  }
+  lookAtObject(obj) { this._followObj = obj; }
+
+  update(dt) {
+    // Resolve live target
+    if (this._followObj) this._followObj.getWorldPosition(this._targetWorld);
+
+    // Saccades
+    if (this.saccadesEnabled) {
+      this._saccT += dt;
+      if (this._saccT > this._saccNext) {
+        this._saccT = 0;
+        this._saccNext = 1.5 + Math.random() * 3;
+        this._saccOff.set(
+          (Math.random() - 0.5) * 0.08,
+          (Math.random() - 0.5) * 0.05,
+          0,
+        );
+      }
+    } else {
+      this._saccOff.set(0, 0, 0);
+    }
+
+    // Aim each bone toward target with clamp + smoothing
+    this._tmpV1.copy(this._targetWorld).add(this._saccOff);
+    for (const info of this._bones) this._aim(info, dt, this._tmpV1);
+  }
+
+  _aim(info, dt, targetWorld) {
+    const bone = info.bone;
+    if (!bone.parent) return;
+    bone.parent.updateMatrixWorld();
+
+    // Target in bone's PARENT local space, direction from bone to target.
+    this._tmpV2.copy(targetWorld);
+    bone.parent.worldToLocal(this._tmpV2);
+    this._tmpV2.sub(bone.position).normalize();
+
+    // Rotation that maps bone-local "forward" axis to that direction.
+    // This IS the desired local quaternion for the bone (independent of rest;
+    // rest pose is implicit in localForward).
+    const desired = this._tmpQ.setFromUnitVectors(info.localForward, this._tmpV2);
+
+    // Clamp total angle. Eye can't rotate 90° without looking insane —
+    // a simple angle clamp keeps the motion plausible (could split H/V but
+    // single-angle is easier and usually fine for avatars facing ~camera).
+    const maxAngle = Math.max(info.maxH, info.maxV);
+    const angle    = 2 * Math.acos(Math.min(1, Math.abs(desired.w)));
+    if (angle > maxAngle) {
+      desired.slerp(this._zeroQ, 1 - maxAngle / angle);
+    }
+
+    // Head-follow factor (< 1 dampens the head rotation vs eyes)
+    if (info.factor < 1) desired.slerp(this._zeroQ, 1 - info.factor);
+
+    // Smooth lerp from current toward desired, using framerate-independent
+    // decay: fraction = 1 - e^(-rate·dt). At 60 FPS with rate=18, k≈0.26/frame.
+    const k = 1 - Math.exp(-info.lerpRate * dt);
+    bone.quaternion.slerp(desired, k);
+  }
+}
 
 class FaceController {
   constructor(morphMap, jawBone = null, cfg = {}) {
@@ -1752,8 +1912,9 @@ class FaceController {
   }
 }
 
-// Global controller instance — created after model loads
+// Global controller instances — created after model loads
 let faceCtrl = null;
+let gazeCtrl = null;
 const manualOverrides = {}; // tester panel sliders write here → faceCtrl.manual
 
 // ===== TESTER PANEL =====
@@ -2719,6 +2880,7 @@ function animate() {
 
   tickLipSync();
   faceCtrl?.update(dt);
+  gazeCtrl?.update(dt);
 
   renderer.render(scene, camera);
 
