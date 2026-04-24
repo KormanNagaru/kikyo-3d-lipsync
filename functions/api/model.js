@@ -43,25 +43,21 @@ export async function onRequestGet({ env }) {
 export async function onRequestPost({ request, env }) {
   if (!request.body) return json(400, { error: 'empty body' });
 
-  // Cheap up-front rejection if the client advertises a too-large payload
-  const lenHeader = request.headers.get('content-length');
-  if (lenHeader && parseInt(lenHeader, 10) > MAX_BYTES) {
+  // Require Content-Length so R2 can accept the stream with a known length.
+  // fetch() with a Blob body sets this automatically.
+  const len = parseInt(request.headers.get('content-length') || '', 10);
+  if (!Number.isFinite(len) || len <= 0) {
+    return json(400, { error: 'Content-Length header required' });
+  }
+  if (len > MAX_BYTES) {
     return json(413, { error: 'file too large', limit: MAX_BYTES });
   }
 
-  // Inline transform that (1) counts bytes for a trustworthy size limit and
-  // (2) verifies the GLB magic on the first 4 bytes. Streams chunks straight
-  // through to R2 without ever buffering the full file in Worker RAM.
-  let totalBytes = 0;
+  // Validate the GLB magic on the first 4 bytes as the stream flows through.
+  // No full-payload buffering — memory footprint is bounded by one chunk.
   let headBuf = new Uint8Array(0);
-
   const validator = new TransformStream({
     transform(chunk, controller) {
-      totalBytes += chunk.byteLength;
-      if (totalBytes > MAX_BYTES) {
-        controller.error(new Error('too-large'));
-        return;
-      }
       if (headBuf.byteLength < 4) {
         const take = Math.min(4 - headBuf.byteLength, chunk.byteLength);
         const merged = new Uint8Array(headBuf.byteLength + take);
@@ -80,24 +76,31 @@ export async function onRequestPost({ request, env }) {
       controller.enqueue(chunk);
     },
     flush(controller) {
-      if (totalBytes === 0)          controller.error(new Error('empty'));
-      else if (headBuf.byteLength < 4) controller.error(new Error('bad-magic'));
+      if (headBuf.byteLength < 4) controller.error(new Error('bad-magic'));
     },
   });
 
+  // R2.put() needs a ReadableStream of known length — FixedLengthStream
+  // provides that while preserving streaming semantics end-to-end.
+  const fixed = new FixedLengthStream(len);
+  const pipePromise = request.body
+    .pipeThrough(validator)
+    .pipeTo(fixed.writable)
+    .catch(err => { throw err; });
+
   try {
-    await env.MODELS.put(OBJECT_KEY, request.body.pipeThrough(validator), {
-      httpMetadata: { contentType: 'model/gltf-binary' },
-    });
+    const [putResult] = await Promise.all([
+      env.MODELS.put(OBJECT_KEY, fixed.readable, {
+        httpMetadata: { contentType: 'model/gltf-binary' },
+      }),
+      pipePromise,
+    ]);
+    return json(200, { ok: true, size: len, etag: putResult?.httpEtag });
   } catch (e) {
     const msg = String(e?.message || e);
-    if (msg.includes('too-large')) return json(413, { error: 'file too large', limit: MAX_BYTES });
     if (msg.includes('bad-magic')) return json(400, { error: 'not a GLB file — first 4 bytes must be "glTF"' });
-    if (msg.includes('empty'))     return json(400, { error: 'empty body' });
     return json(500, { error: 'upload failed: ' + msg });
   }
-
-  return json(200, { ok: true, size: totalBytes });
 }
 
 export async function onRequestDelete({ env }) {
