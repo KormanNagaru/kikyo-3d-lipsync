@@ -456,28 +456,97 @@ body {
 <script type="module">
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 
 // ===== CHARACTER SHADER =====
 
-function patchCharacterShader(shader, isHair) {
+// Shader patch for the character's body/clothes (skin) and hair materials.
+//
+// SKIN path adds (on top of the shared GSAA + spec-occlusion + rim):
+//   1. Diffuse wrap (Valve/Pixar "half-lambert"-style) — replaces the N·L clamp
+//      with `saturate((N·L + w)/(1+w))` so shadowed skin stays softly lit
+//      instead of going dead black. Cheap, huge realism win.
+//   2. Detail normal blend — if the user supplies a tiling micro-normal
+//      (pores/micro-detail), it's mixed with the main normal after the
+//      standard normalmap chunk. No-op when detailNormalMap uniform is absent.
+//   3. Back-scatter fake SSS — uses the ALPHA channel of aoMap as a
+//      thickness mask (artist pipeline: ORMT = AO, Rough, Metal, Thickness in
+//      RGBA of one texture). Adds a warm wrap-shaped term where light goes
+//      through ear edges / nose wings / fingers. Zero-cost when aoMap
+//      thickness is 0 / absent.
+//
+// HAIR path REPLACES the GGX specular highlight with a dual-lobe Kajiya-Kay
+// anisotropic spec. Tangent is derived from UV-V direction (artist confirmed
+// UV layout: V axis runs root→tip on every hair card), computed per-pixel
+// via screen-space derivatives — no extra vertex attributes required.
+function patchCharacterShader(shader, isHair, opts = {}) {
+  // ---- Shared uniforms ----
   shader.uniforms.uRimColor    = { value: new THREE.Color(0.55, 0.65, 0.85) };
   shader.uniforms.uRimStrength = { value: isHair ? 0.15 : 0.35 };
   shader.uniforms.uRimPower    = { value: 3.5 };
 
-  // Uniform declarations
+  // ---- Skin-only uniforms ----
+  if (!isHair) {
+    shader.uniforms.uWrap            = { value: opts.wrap           ?? 0.35 };
+    shader.uniforms.uSSSColor        = { value: new THREE.Color(...(opts.sssColor || [0.95, 0.35, 0.25])) };
+    shader.uniforms.uSSSStrength     = { value: opts.sssStrength    ?? 0.5  };
+    shader.uniforms.uSSSPower        = { value: opts.sssPower       ?? 4.0  };
+    shader.uniforms.uDetailTile      = { value: opts.detailTile     ?? 15.0 };
+    shader.uniforms.uDetailStr       = { value: opts.detailStrength ?? 0.5  };
+    if (opts.detailNormalMap) {
+      shader.uniforms.detailNormalMap = { value: opts.detailNormalMap };
+      shader.defines = Object.assign({}, shader.defines, { USE_DETAIL_NORMAL: '' });
+    }
+  }
+
+  // ---- Hair-only uniforms (dual Kajiya-Kay highlights) ----
+  if (isHair) {
+    shader.uniforms.uHairTint       = { value: new THREE.Color(...(opts.hairTint || [1.0, 0.85, 0.75])) };
+    shader.uniforms.uHairShift1     = { value: opts.hairShift1     ?? -0.015 };
+    shader.uniforms.uHairShift2     = { value: opts.hairShift2     ??  0.04  };
+    shader.uniforms.uHairExp1       = { value: opts.hairExp1       ?? 80.0   };
+    shader.uniforms.uHairExp2       = { value: opts.hairExp2       ??  8.0   };
+    shader.uniforms.uHairStr1       = { value: opts.hairStr1       ??  0.6   };
+    shader.uniforms.uHairStr2       = { value: opts.hairStr2       ??  0.3   };
+  }
+
+  // ---- Uniform declarations + per-frame accumulators ----
+  const skinDecls = !isHair ? `
+uniform float uWrap;
+uniform vec3  uSSSColor;
+uniform float uSSSStrength;
+uniform float uSSSPower;
+uniform float uDetailTile;
+uniform float uDetailStr;
+#ifdef USE_DETAIL_NORMAL
+  uniform sampler2D detailNormalMap;
+#endif
+vec3 gSssExtra = vec3(0.0);
+` : '';
+
+  const hairDecls = isHair ? `
+uniform vec3  uHairTint;
+uniform float uHairShift1;
+uniform float uHairShift2;
+uniform float uHairExp1;
+uniform float uHairExp2;
+uniform float uHairStr1;
+uniform float uHairStr2;
+vec3 gHairSpec = vec3(0.0);
+` : '';
+
   shader.fragmentShader = shader.fragmentShader.replace(
     'void main() {',
     `uniform vec3  uRimColor;
 uniform float uRimStrength;
 uniform float uRimPower;
+${skinDecls}${hairDecls}
 void main() {`
   );
 
-  // Geometric Specular AA (Tokuyoshi & Kaplanyan 2019):
-  // Bumps roughness where the normal changes quickly across screen pixels,
-  // eliminating specular aliasing on curved surfaces with detailed normal maps.
+  // ---- Shared: geometric specular AA (Tokuyoshi & Kaplanyan 2019) ----
   shader.fragmentShader = shader.fragmentShader.replace(
     '#include <lights_fragment_begin>',
     `{
@@ -489,9 +558,68 @@ void main() {`
 #include <lights_fragment_begin>`
   );
 
-  // Direct specular occlusion (Filament "Moving to PBR" approximation).
-  // Expands the aomap chunk so AO also occludes direct specular, not just indirect.
-  // r162 uses local vars `geometryNormal` / `geometryViewDir` (no struct wrapping).
+  // ---- Skin: detail normal blend after normal_fragment_maps ----
+  if (!isHair) {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <normal_fragment_maps>',
+      `#include <normal_fragment_maps>
+#ifdef USE_DETAIL_NORMAL
+  {
+    vec3 _dnTex = texture2D(detailNormalMap, vMapUv * uDetailTile).xyz * 2.0 - 1.0;
+    _dnTex.xy *= uDetailStr;
+    normal = normalize(normal + _dnTex);
+  }
+#endif`
+    );
+
+    // Skin: diffuse wrap + back-scatter fake SSS inside direct-light loop
+    shader.fragmentShader = shader.fragmentShader.replace(
+      'float dotNL = saturate( dot( geometryNormal, directLight.direction ) );',
+      `float _ndl = dot( geometryNormal, directLight.direction );
+float dotNL = saturate( (_ndl + uWrap) / (1.0 + uWrap) );
+#ifdef USE_AOMAP
+  float _thick = texture2D(aoMap, vAoMapUv).a;
+#else
+  float _thick = 0.0;
+#endif
+if (_thick > 0.01) {
+  float _backNdV = saturate(dot(geometryViewDir, -directLight.direction) + uWrap);
+  gSssExtra += directLight.color * pow(_backNdV, uSSSPower) * uSSSColor * uSSSStrength * _thick;
+}`
+    );
+  }
+
+  // ---- Hair: Kajiya-Kay dual-highlight specular injected into direct-light loop ----
+  if (isHair) {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      'vec3 irradiance = dotNL * directLight.color;',
+      `vec3 irradiance = dotNL * directLight.color;
+{
+  // Derive a per-pixel tangent aligned with UV-V (root→tip on every hair card)
+  // from screen-space derivatives. Fails gracefully on degenerate UV (det≈0).
+  vec3  _dPx  = dFdx(-vViewPosition);
+  vec3  _dPy  = dFdy(-vViewPosition);
+  vec2  _dUVx = dFdx(vMapUv);
+  vec2  _dUVy = dFdy(vMapUv);
+  float _det  = _dUVx.x * _dUVy.y - _dUVx.y * _dUVy.x;
+  vec3  _B    = (_dPy * _dUVx.x - _dPx * _dUVy.x) * (_det < 0.0 ? -1.0 : 1.0);
+  float _Bl   = length(_B);
+  if (_Bl > 1e-5) {
+    vec3 T  = _B / _Bl;
+    vec3 T1 = normalize(T + uHairShift1 * geometryNormal);
+    vec3 T2 = normalize(T + uHairShift2 * geometryNormal);
+    vec3 H  = normalize(directLight.direction + geometryViewDir);
+    float d1 = dot(T1, H); float s1 = sqrt(max(1.0 - d1 * d1, 0.0));
+    float d2 = dot(T2, H); float s2 = sqrt(max(1.0 - d2 * d2, 0.0));
+    vec3  _p  = vec3(1.0) * pow(s1, uHairExp1) * uHairStr1;
+    vec3  _s  = uHairTint * material.diffuseColor * pow(s2, uHairExp2) * uHairStr2;
+    gHairSpec += directLight.color * dotNL * (_p + _s);
+  }
+}`
+    );
+  }
+
+  // ---- Shared: direct specular occlusion (Filament) ----
   shader.fragmentShader = shader.fragmentShader.replace(
     '#include <aomap_fragment>',
     THREE.ShaderChunk.aomap_fragment.replace(
@@ -506,17 +634,19 @@ void main() {`
     )
   );
 
-  // Fresnel rim light — subtle backlit halo, suppressed on metallic surfaces.
+  // ---- Final composition: rim + extras ----
+  const extras = !isHair ? 'outgoingLight += gSssExtra;' : 'outgoingLight += gHairSpec;';
   shader.fragmentShader = shader.fragmentShader.replace(
     'vec3 outgoingLight = totalDiffuse + totalSpecular + totalEmissiveRadiance;',
     `vec3 outgoingLight = totalDiffuse + totalSpecular + totalEmissiveRadiance;
 float NdotV_rim = saturate(dot(geometryNormal, geometryViewDir));
 float rim = pow(1.0 - NdotV_rim, uRimPower) * uRimStrength;
-outgoingLight += uRimColor * rim * (1.0 - metalnessFactor);`
+outgoingLight += uRimColor * rim * (1.0 - metalnessFactor);
+${extras}`
   );
 }
 
-function createCharacterMaterial(textures, isHair) {
+function createCharacterMaterial(textures, isHair, opts = {}) {
   const mat = new THREE.MeshStandardMaterial({
     map:          textures.diffuse   || null,
     normalMap:    textures.normal    || null,
@@ -532,10 +662,18 @@ function createCharacterMaterial(textures, isHair) {
       alphaTest:   0.5,
       transparent: false,
       depthWrite:  true,
+      // Softer silhouettes when MSAA is active — gracefully ignored when not.
+      alphaToCoverage: true,
     }),
   });
-  mat.onBeforeCompile = (shader) => patchCharacterShader(shader, isHair);
-  mat.customProgramCacheKey = () => `charMat_${isHair ? 'hair' : 'skin'}`;
+  const patchOpts = { ...opts };
+  if (!isHair && textures.detailNormal) patchOpts.detailNormalMap = textures.detailNormal;
+  mat.onBeforeCompile = (shader) => patchCharacterShader(shader, isHair, patchOpts);
+  // Program cache key includes a hint so skin-with-detail and skin-no-detail
+  // don't share a compiled program (otherwise the #ifdef USE_DETAIL_NORMAL
+  // would snap the define from the material that compiled first).
+  mat.customProgramCacheKey = () =>
+    `charMat_${isHair ? 'hair' : 'skin'}_${patchOpts.detailNormalMap ? 'dn' : 'nodn'}`;
   return mat;
 }
 
@@ -778,6 +916,44 @@ function wordToPhonemes(word) {
 // ===== LOAD MODEL =====
 const loader = new GLTFLoader();
 loader.setMeshoptDecoder(MeshoptDecoder);
+
+// KTX2 transcoder lets the loader read GPU-compressed (BC7/ETC2/ASTC) textures
+// from KTX2-optimized GLBs (e.g. produced by `gltfpack -tc`). Falls back silently
+// for GLBs with embedded PNG/JPG, so this is safe to wire up defensively.
+const ktx2 = new KTX2Loader()
+  .setTranscoderPath('https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/libs/basis/')
+  .detectSupport(renderer);
+loader.setKTX2Loader(ktx2);
+
+// ===== RESOURCE DISPOSAL =====
+// WebGL resources (geometries/materials/textures) are NOT reclaimed by JS GC.
+// Call this before removing a model from the scene or VRAM leaks on every swap.
+function disposeObject3D(root) {
+  const seen = new WeakSet();
+  const disposeMaterial = (mat) => {
+    if (!mat || seen.has(mat)) return;
+    seen.add(mat);
+    for (const k of [
+      'map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap',
+      'alphaMap', 'emissiveMap', 'bumpMap', 'displacementMap',
+      'specularMap', 'envMap', 'lightMap', 'matcap',
+      // Our custom pack's optional channels
+      'thicknessMap', 'detailNormalMap',
+    ]) {
+      const tex = mat[k];
+      if (tex && !seen.has(tex)) { seen.add(tex); tex.dispose(); }
+    }
+    mat.dispose();
+  };
+  root.traverse((c) => {
+    if (c.geometry && !seen.has(c.geometry)) { seen.add(c.geometry); c.geometry.dispose(); }
+    if (c.material) {
+      if (Array.isArray(c.material)) c.material.forEach(disposeMaterial);
+      else disposeMaterial(c.material);
+    }
+    if (c.skeleton && !seen.has(c.skeleton)) { seen.add(c.skeleton); c.skeleton.dispose?.(); }
+  });
+}
 const loadingEl = document.getElementById('loading');
 const loadingText = document.getElementById('loadingText');
 const statusEl = document.getElementById('status');
@@ -1024,6 +1200,11 @@ async function loadModelFromBlob(blob, filename) {
       controls.update();
       console.log('Camera:', camera.position, 'target:', controls.target);
 
+      // Pre-compile all shader programs for the new model so the FIRST frame
+      // after the loading screen hides doesn't stall on async shader compilation.
+      // This is noticeable on low-end GPUs as a 200-500 ms freeze right after load.
+      renderer.compile(scene, camera);
+
       // Done loading
       const loadMs = performance.now() - t0;
       document.getElementById('loadTime').textContent = (loadMs / 1000).toFixed(2) + 's';
@@ -1100,11 +1281,13 @@ async function handleFile(file) {
 
   loadingText.textContent = `Loading ${file.name}…`;
 
-  // Reset state for a new model
+  // Reset state for a new model — dispose GPU resources first (VRAM leak otherwise).
   if (model) {
     scene.remove(model);
+    disposeObject3D(model);
     model = null;
   }
+  if (mixer) { mixer.stopAllAction(); mixer = null; }
   morphMeshes = [];
   morphMap = {};
   faceCtrl = null;
@@ -1507,8 +1690,66 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
+// ===== AVATAR STATE MACHINE =====
+// Minimal FSM for now: IDLE ↔ SPEAKING. Additional states (LISTENING, THINKING,
+// INTERRUPTED) will slot in when mic/LLM subsystems land — the event API below
+// is already shaped to accept them.
+const AVATAR_STATES = Object.freeze({
+  IDLE:     'idle',
+  SPEAKING: 'speaking',
+  // Reserved for future wiring:
+  // LISTENING:   'listening',
+  // THINKING:    'thinking',
+  // INTERRUPTED: 'interrupted',
+});
+
+class AvatarStateMachine {
+  constructor() {
+    this._state = AVATAR_STATES.IDLE;
+    this._listeners = {}; // event → [cb]
+  }
+  get state() { return this._state; }
+  is(s) { return this._state === s; }
+  on(event, cb) { (this._listeners[event] ||= []).push(cb); return () => this.off(event, cb); }
+  off(event, cb) {
+    const a = this._listeners[event]; if (!a) return;
+    const i = a.indexOf(cb); if (i >= 0) a.splice(i, 1);
+  }
+  _emit(event, ...args) {
+    for (const cb of (this._listeners[event] || [])) {
+      try { cb(...args); } catch (e) { console.error(`[AvatarState] listener for "${event}":`, e); }
+    }
+  }
+  transition(next) {
+    if (this._state === next) return;
+    const prev = this._state;
+    this._emit(`exit:${prev}`);
+    this._state = next;
+    this._emit(`enter:${next}`);
+    this._emit('change', next, prev);
+  }
+  startSpeaking() { this.transition(AVATAR_STATES.SPEAKING); }
+  stopSpeaking()  { this.transition(AVATAR_STATES.IDLE); }
+}
+
+const avatarState = new AvatarStateMachine();
+
+// Centralized cleanup on leaving SPEAKING — removes the duplicated cleanup that
+// was previously scattered across utt.onend and utt.onerror.
+avatarState.on(`exit:${AVATAR_STATES.SPEAKING}`, () => {
+  currentWordPhonemes = [];
+  phonemeSchedule    = [];
+  faceCtrl?.clearEmotions();
+  const ls = document.getElementById('lsStatus'); if (ls) ls.textContent = 'idle';
+  const sb = document.getElementById('speakBtn'); if (sb) sb.disabled = false;
+});
+
 // Active word animation state
+// `speaking` is kept as a mirror of avatarState so existing hot-path code
+// (tickLipSync) doesn't need to reach through the FSM every frame.
 let speaking = false;
+avatarState.on('change', (next) => { speaking = (next === AVATAR_STATES.SPEAKING); });
+
 let currentWordPhonemes = [];
 let wordStartTime = 0;
 let wordDuration = 0;
@@ -1781,8 +2022,11 @@ function updateEmotionsForChar(charIndex) {
   }
 }
 
+let _speechEpoch = 0;
 function speak(text) {
   if (synth.speaking) synth.cancel();
+  const epoch = ++_speechEpoch; // guard callbacks against races when user
+                                //  re-speaks before the 200 ms tail elapses
 
   const utt = new SpeechSynthesisUtterance(text);
   if (voiceSelect.value) utt.voice = voices[parseInt(voiceSelect.value)];
@@ -1793,7 +2037,7 @@ function speak(text) {
   emotionRanges = analyzeEmotions(text);
 
   utt.onstart = () => {
-    speaking = true;
+    avatarState.startSpeaking();
     lastBoundaryTime = performance.now() / 1000;
     lastBoundaryChar = 0;
     speechStartTime = performance.now() / 1000;
@@ -1826,23 +2070,19 @@ function speak(text) {
   };
 
   utt.onend = () => {
+    // 200 ms tail lets the last phoneme finish rendering before lips relax.
     setTimeout(() => {
-      speaking = false;
-      currentWordPhonemes = [];
-      faceCtrl?.clearEmotions();
-      document.getElementById('lsStatus').textContent = 'idle';
+      if (epoch !== _speechEpoch) return; // a newer utterance took over
+      avatarState.stopSpeaking();
       setStatus('Ready');
-      document.getElementById('speakBtn').disabled = false;
     }, 200);
   };
 
   utt.onerror = (e) => {
     console.error('TTS error:', e.error);
-    speaking = false;
-    currentWordPhonemes = [];
-    faceCtrl?.clearEmotions();
+    if (epoch !== _speechEpoch) return;
+    avatarState.stopSpeaking();
     setStatus('Speech error: ' + e.error);
-    document.getElementById('speakBtn').disabled = false;
   };
 
   document.getElementById('speakBtn').disabled = true;
