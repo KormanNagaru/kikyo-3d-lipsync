@@ -143,6 +143,57 @@ body {
 #stats .good { color: #4ade80; }
 #stats .warn { color: #fbbf24; }
 #stats .bad { color: #f87171; }
+
+/* Performance graphs — separate, collapsible panel */
+#perfPanel {
+  position: fixed;
+  left: 10px;
+  top: 450px;
+  background: rgba(0,0,0,0.82);
+  border-radius: 10px;
+  font-size: 12px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  z-index: 20;
+  width: 260px;
+  padding: 8px 12px;
+  backdrop-filter: blur(6px);
+  border: 1px solid rgba(108,99,255,0.3);
+}
+#perfPanel .hdr {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: #a78bfa;
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 1px;
+  cursor: pointer;
+  user-select: none;
+}
+#perfPanel .hdr button {
+  background: rgba(108,99,255,0.12);
+  border: 1px solid rgba(108,99,255,0.3);
+  color: #a78bfa;
+  width: 22px; height: 22px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+#perfPanel .chart { margin-top: 8px; }
+#perfPanel .chart .crow {
+  display: flex; justify-content: space-between;
+  font-size: 11px; color: #aaa; margin-bottom: 2px;
+}
+#perfPanel .chart .clabel { color: #888; }
+#perfPanel .chart .cval { color: #6c63ff; font-weight: 600; }
+#perfPanel canvas {
+  display: block; width: 100%; height: 40px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 4px;
+}
+#perfPanel.collapsed .chart { display: none; }
+#perfPanel.collapsed { width: auto; padding: 6px 10px; }
 #status {
   position: fixed;
   top: 60px;
@@ -240,7 +291,7 @@ body {
 #tuningPanel {
   position: fixed;
   top: 10px;
-  left: 240px;
+  left: 290px;
   background: rgba(0,0,0,0.82);
   border-radius: 10px;
   font-size: 12px;
@@ -390,8 +441,6 @@ body {
   <div><span class="label">Long tasks: </span><span id="longTasks" class="value">0</span></div>
   <div><span class="label">Net total: </span><span id="netTotal" class="value">0 B</span></div>
   <div><span class="label">Net rate: </span><span id="netRate" class="value">0 B/s</span></div>
-  <canvas id="netSpark" width="260" height="36" style="display:block; margin:4px 0 2px; background:rgba(255,255,255,0.03); border-radius:4px;"></canvas>
-  <div style="font-size:10px; color:#666; margin-bottom:4px;" id="netSparkLabel">bytes/s — last 60 s</div>
   <div><span class="label">Requests: </span><span id="netReq" class="value">0</span></div>
   <hr style="border:0; border-top:1px solid rgba(255,255,255,0.08); margin:6px 0;">
   <div><span class="label">Load time: </span><span id="loadTime" class="value">--</span></div>
@@ -402,9 +451,29 @@ body {
   <div><span class="label">Draw calls: </span><span id="drawCalls" class="value">--</span></div>
   <div><span class="label">Programs: </span><span id="progCount" class="value">--</span></div>
   <div><span class="label">Textures#: </span><span id="texCount" class="value">--</span></div>
+  <div><span class="label">Tex format: </span><span id="texFormat" class="value">--</span></div>
   <div><span class="label">Geometries: </span><span id="geomCount" class="value">--</span></div>
   <div><span class="label">Lip sync: </span><span id="lsStatus" class="value">idle</span></div>
   <div id="gpuInfo" style="font-size:10px; color:#666; margin-top:6px; max-width:260px; word-break:break-word; line-height:1.3;"></div>
+</div>
+
+<div id="perfPanel">
+  <div class="hdr">
+    <span>PERFORMANCE GRAPHS</span>
+    <button id="perfCollapseBtn" title="Collapse / expand">−</button>
+  </div>
+  <div class="chart">
+    <div class="crow"><span class="clabel">CPU ms</span><span class="cval" id="cpuLbl">—</span></div>
+    <canvas id="cpuSpark" width="236" height="40"></canvas>
+  </div>
+  <div class="chart">
+    <div class="crow"><span class="clabel">GPU ms</span><span class="cval" id="gpuLbl">—</span></div>
+    <canvas id="gpuSpark" width="236" height="40"></canvas>
+  </div>
+  <div class="chart">
+    <div class="crow"><span class="clabel">Network</span><span class="cval" id="netLbl">—</span></div>
+    <canvas id="netSpark" width="236" height="40"></canvas>
+  </div>
 </div>
 
 <div id="status">Ready</div>
@@ -1151,6 +1220,38 @@ async function loadModelFromBlob(blob, filename) {
         }
       });
       document.getElementById('triCount').textContent = Math.round(totalTris).toLocaleString();
+
+      // Texture format diagnostic — counts how many textures came in as
+      // GPU-compressed (KTX2 → BC7/ETC2/ASTC via basisu transcoder) vs
+      // still-raw PNG/JPEG. Useful to verify gltfpack optimization actually
+      // landed, and to spot wasted VRAM.
+      {
+        let ktx2 = 0, raw = 0;
+        const seen = new Set();
+        const slots = ['map','normalMap','roughnessMap','metalnessMap','aoMap','alphaMap','emissiveMap','bumpMap','displacementMap'];
+        model.traverse((child) => {
+          if (!child.isMesh) return;
+          const mats = Array.isArray(child.material) ? child.material : [child.material];
+          for (const mat of mats) {
+            if (!mat) continue;
+            for (const s of slots) {
+              const tex = mat[s];
+              if (!tex || seen.has(tex)) continue;
+              seen.add(tex);
+              if (tex.isCompressedTexture) ktx2++;
+              else raw++;
+            }
+          }
+        });
+        const texFormatEl = document.getElementById('texFormat');
+        if (texFormatEl) {
+          if (ktx2 === 0 && raw === 0)      texFormatEl.textContent = 'none';
+          else if (ktx2 > 0 && raw === 0)   texFormatEl.textContent = `${ktx2} KTX2`;
+          else if (ktx2 === 0 && raw > 0)   texFormatEl.textContent = `${raw} raw (PNG/JPG)`;
+          else                              texFormatEl.textContent = `${ktx2} KTX2 + ${raw} raw`;
+        }
+        console.log(`Textures loaded: ${ktx2} KTX2, ${raw} raw (PNG/JPG)`);
+      }
 
       // Index-based mapping for the BS_Rig export pipeline, which writes
       // blendshapes without semantic names (0..18). Detect by CONTENT
@@ -2472,48 +2573,63 @@ function _fmtBytes(n) {
   return n + ' B';
 }
 
-// ===== NETWORK SPARKLINE =====
-// 60 samples × ~500 ms each = ~30 s history. Bars grow against the running
-// max across the window so the scale auto-adjusts to whatever's happening.
-const NET_SAMPLES_MAX = 60;
-const _netSamples = [];
-const _netSparkCanvas = document.getElementById('netSpark');
-const _netSparkCtx = _netSparkCanvas?.getContext('2d') || null;
+// ===== SPARKLINES (CPU / GPU / Network) =====
+// All three charts share a ring buffer of 60 samples × ~500 ms = ~30 s of
+// history. Bars auto-scale to each chart's own running max so the shape is
+// readable regardless of absolute values.
+const SPARK_MAX = 60;
 
-function pushNetSample(rateBytesPerSec) {
-  _netSamples.push(rateBytesPerSec);
-  if (_netSamples.length > NET_SAMPLES_MAX) _netSamples.shift();
+function makeSpark(canvasId, { peakFmt, fixedMax = null } = {}) {
+  const canvas = document.getElementById(canvasId);
+  const ctx    = canvas?.getContext('2d') || null;
+  const samples = [];
+  return {
+    push(v) {
+      samples.push(v);
+      if (samples.length > SPARK_MAX) samples.shift();
+    },
+    draw() {
+      if (!ctx) return;
+      const W = canvas.width, H = canvas.height;
+      ctx.clearRect(0, 0, W, H);
+      if (!samples.length) return;
+      const observed = Math.max(...samples, 0);
+      const max = fixedMax ?? Math.max(1e-6, observed);
+      const bw = W / SPARK_MAX;
+      for (let i = 0; i < samples.length; i++) {
+        const v = samples[i];
+        const t = Math.min(1, v / max);
+        const h = t * (H - 2);
+        const x = (SPARK_MAX - samples.length + i) * bw;
+        ctx.fillStyle = v > 0
+          ? `rgba(${108 + t * 60}, ${99 + t * 40}, 255, ${0.35 + t * 0.5})`
+          : 'rgba(80, 80, 100, 0.15)';
+        ctx.fillRect(x + 0.5, H - h - 1, Math.max(bw - 1, 1), h);
+      }
+      ctx.fillStyle = 'rgba(200, 200, 220, 0.55)';
+      ctx.font = '9px Consolas, Monaco, monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText('peak ' + peakFmt(observed), W - 3, 10);
+    },
+    latest: () => samples.length ? samples[samples.length - 1] : 0,
+  };
 }
-function drawNetSpark() {
-  if (!_netSparkCtx) return;
-  const c = _netSparkCanvas;
-  const ctx = _netSparkCtx;
-  const W = c.width, H = c.height;
-  ctx.clearRect(0, 0, W, H);
 
-  if (_netSamples.length === 0) return;
-  const max = Math.max(1, ..._netSamples);
-  const bw = W / NET_SAMPLES_MAX;
+const cpuSpark = makeSpark('cpuSpark', { peakFmt: (v) => v.toFixed(2) + ' ms' });
+const gpuSpark = makeSpark('gpuSpark', { peakFmt: (v) => v.toFixed(2) + ' ms' });
+const netSpark = makeSpark('netSpark', { peakFmt: (v) => _fmtBytes(Math.round(v)) + '/s' });
 
-  // Bars — right-aligned (newest samples on the right edge).
-  for (let i = 0; i < _netSamples.length; i++) {
-    const v = _netSamples[i];
-    const h = (v / max) * (H - 2);
-    const x = (NET_SAMPLES_MAX - _netSamples.length + i) * bw;
-    // Gradient: low = purple, high = lavender — matches app theme
-    const t = v / max;
-    ctx.fillStyle = v > 0
-      ? `rgba(${108 + t * 60}, ${99 + t * 40}, ${255}, ${0.35 + t * 0.5})`
-      : 'rgba(80, 80, 100, 0.15)';
-    ctx.fillRect(x + 0.5, H - h - 1, Math.max(bw - 1, 1), h);
-  }
+// Collapse button for the perf panel
+document.getElementById('perfCollapseBtn')?.addEventListener('click', () => {
+  const panel = document.getElementById('perfPanel');
+  const btn   = document.getElementById('perfCollapseBtn');
+  const collapsed = panel.classList.toggle('collapsed');
+  btn.textContent = collapsed ? '+' : '−';
+});
 
-  // Peak label at top-right (helps to read the scale)
-  ctx.fillStyle = 'rgba(200, 200, 220, 0.55)';
-  ctx.font = '9px Consolas, Monaco, monospace';
-  ctx.textAlign = 'right';
-  ctx.fillText('peak ' + _fmtBytes(Math.round(max)) + '/s', W - 3, 10);
-}
+// Back-compat shims so existing code keeps working without edits further down.
+function pushNetSample(v) { netSpark.push(v); }
+function drawNetSpark()    { netSpark.draw(); }
 
 // ===== FPS + PERF COUNTER =====
 let fpsFrames = 0;
@@ -2569,8 +2685,19 @@ function updateFPS() {
   netRateEl.textContent  = _fmtBytes(Math.round(rate)) + '/s';
   netReqEl.textContent   = _netRequestCount;
 
-  pushNetSample(rate);
-  drawNetSpark();
+  // Sparklines — push the period's average for CPU/GPU (single current
+  // reading for net, since it's already a rolling average).
+  const avgCpu = _cpuSumMs / fpsFrames;
+  const avgGpu = gpuMs;
+  cpuSpark.push(avgCpu);
+  gpuSpark.push(avgGpu);
+  netSpark.push(rate);
+  cpuSpark.draw();
+  gpuSpark.draw();
+  netSpark.draw();
+  const cpuLbl = document.getElementById('cpuLbl'); if (cpuLbl) cpuLbl.textContent = avgCpu.toFixed(2) + ' ms';
+  const gpuLbl = document.getElementById('gpuLbl'); if (gpuLbl) gpuLbl.textContent = (_timerExt ? avgGpu.toFixed(2) + ' ms' : 'n/a');
+  const netLbl = document.getElementById('netLbl'); if (netLbl) netLbl.textContent = _fmtBytes(Math.round(rate)) + '/s';
 
   fpsFrames = 0;
   _cpuSumMs = 0;
