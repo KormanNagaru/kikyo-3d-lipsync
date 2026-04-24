@@ -2273,7 +2273,7 @@ async function autoLoadDefault() {
   }
 
   // 2. Bundled candidates (first-time, before any admin upload)
-  const candidates = ['KikyoNewTest.glb', 'KikyoNewTestAnimation.glb', 'BS_Rig_Test_V01_compressed.glb'];
+  const candidates = ['BS_Rig_Test_V01.glb'];
   for (const name of candidates) {
     try {
       const resp = await fetch('./' + encodeURIComponent(name));
